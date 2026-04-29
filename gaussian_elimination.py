@@ -132,50 +132,22 @@ def read_solution(H_aug, n_vars, pivot_cols):
 
 def gaussian_elimination_f2(H, s):
     """
-    Full GE pipeline over F2.
-    Combines all three pieces into one callable function.
-    
-    Inputs:
-        H: numpy 2D array, dtype=int, shape (m, n)
-        s: numpy 1D array, dtype=int, shape (m,)
-    
-    Returns:
-        solution:      numpy 1D array or None
-        is_consistent: bool
-        pivot_cols:    list of pivot column indices
-        free_cols:     list of free variable column indices
+    Full GE pipeline over F₂.
+    Note: free_cols here includes ALL non-pivot columns including zeros.
+    Use erasure_decode_f2 for erasure decoding to get correct free_cols.
     """
-    n_vars  = H.shape[1]
-    H_aug   = make_augmented_matrix(H, s)
-
+    n_vars     = H.shape[1]
+    H_aug      = make_augmented_matrix(H, s)
     pivot_cols = forward_eliminate(H_aug, n_vars)
     free_cols  = [c for c in range(n_vars) if c not in pivot_cols]
-
     solution, is_consistent = read_solution(H_aug, n_vars, pivot_cols)
-
     return solution, is_consistent, pivot_cols, free_cols
 
 
 def erasure_decode_f2(H, s, erasure_index_set):
     """
     Maximum-likelihood erasure decoder for a classical linear code.
-    
-    Zeros out columns of H for non-erased bits, then runs GE.
-    Free variables within the erasure are set to 0 (min weight).
-    
-    Inputs:
-        H:                  numpy 2D array, dtype=int, shape (m, n)
-        s:                  numpy 1D array, dtype=int, shape (m,)
-        erasure_index_set:  set of int, indices of erased bits
-    
-    Returns:
-        solution:      numpy 1D array, dtype=int, shape (n,)
-                       predicted error vector (0 on non-erased bits)
-        is_consistent: bool
-                       False means decoding failure
-        free_cols:     list of int
-                       free variable indices within the erasure
-                       non-empty means degenerate solution exists
+    Fixed: free_cols now restricted to erasure_index_set only.
     """
     n_vars   = H.shape[1]
 
@@ -185,9 +157,13 @@ def erasure_decode_f2(H, s, erasure_index_set):
         if bit_index not in erasure_index_set:
             H_active[:, bit_index] = 0
 
-    # Run GE on the restricted system
-    solution, is_consistent, pivot_cols, free_cols = gaussian_elimination_f2(
+    solution, is_consistent, pivot_cols, _ = gaussian_elimination_f2(
         H_active, s
     )
+
+    # Restrict free cols to erasure set — non-erased columns are
+    # structurally zero and never genuinely free
+    free_cols = [c for c in sorted(erasure_index_set)
+                 if c not in pivot_cols]
 
     return solution, is_consistent, free_cols
