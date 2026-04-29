@@ -131,6 +131,26 @@ This is the core insight behind the cluster decoder of Yao et al. (2025).
 numpy
 ```
 
+### Repository Structure
+
+```
+ge_decoder.py                 — all four GE decoder versions (Dense, v1, v2, v3)
+run_hgp_tests.py              — HGP code loader, builder, and correctness tests
+ge_benchmark_experiment.py    — benchmark and plot all four versions vs code size
+README.md                     — this file
+```
+
+Data files required by `run_hgp_tests.py` (download from Connolly et al. repo):
+
+```
+PEG_HGP_code_(3,4)_family_n625_k25_classicalH.txt
+PEG_HGP_code_(3,4)_family_n1225_k65_classicalH.txt
+PEG_HGP_code_(3,4)_family_n1600_k64_classicalH.txt
+PEG_HGP_code_(3,4)_family_n2025_k81_classicalH.txt
+```
+
+Source: https://github.com/Nicholas-Connolly/Pruned-Peeling-and-VH-Decoder
+
 ### Data Conventions
 
 All matrices use `numpy` 2D arrays with `dtype=int`, matching the convention
@@ -781,23 +801,122 @@ The speedup grows with n because row weight w stays constant (4) while
 dense cost scales as O(n). The v2→v3 gap widens at larger n as construction
 savings become more significant relative to elimination cost.
 
-### Note on Adding Your Own Test Cases
+---
 
-Always pass `erasure_index_set` as a **Python set**, not a list:
+## HGP Code Testing
 
-```python
-# Correct
-erasure_decode_sparse_v3(H, s, {0, 1, 2, 3})
+`run_hgp_tests.py` loads the classical parity-check matrices from the Connolly
+et al. txt files, builds the full HGP CSS code via the tensor product construction,
+and verifies that all four GE decoder versions produce correct, consistent results.
 
-# Avoid — list ordering may cause v3 to choose a different
-# (but equally valid) solution when free variables exist
-erasure_decode_sparse_v3(H, s, [3, 1, 0, 2])
+### HGP Construction
+
+Given a classical parity-check matrix H of shape (m, n):
+
+```
+Hx = [ H ⊗ I_n  |  I_m ⊗ H^T ]   shape: (m*n, n²+m²)
+Hz = [ I_n ⊗ H  |  H^T ⊗ I_m ]   shape: (n*m, n²+m²)
 ```
 
-When free variables exist, all versions return a valid solution —
-but the specific solution chosen depends on the column iteration order.
-Using a set guarantees the sorted() call inside v3 produces consistent
-results matching the dense version.
+CSS orthogonality condition: `Hx @ Hz.T = 0` over F₂.
+
+Quantum code parameters: N = n²+m² physical qubits, K = k² logical qubits.
+
+### Correctness Criteria
+
+Three agreement rules are checked for every trial:
+
+| Rule | Check | Failure means |
+|------|-------|---------------|
+| 1 | Consistency verdict matches across all versions | One version incorrectly reports solvability |
+| 2 | Solution satisfies `Hx @ sol = sx` over F₂ | Solution is algebraically wrong |
+| 3 | Solution vectors are identical across versions | Versions found different corrections |
+
+**Note on free variables:** Different decoder versions may report different
+`free_cols` sets while arriving at the same solution vector. This is acceptable —
+it reflects different internal pivot orderings, not a correctness problem.
+Only rules 1–3 are enforced as failures.
+
+### Usage
+
+```bash
+# Test all four code families
+python run_hgp_tests.py
+
+# Test one family
+python run_hgp_tests.py --code n625
+
+# Custom erasure rate and trial count
+python run_hgp_tests.py --erasure-rate 0.2 --trials 50
+
+# List available families
+python run_hgp_tests.py --list
+
+# Data files in a different directory
+python run_hgp_tests.py --data-dir ./codes/
+```
+
+### Example Output
+
+```
+HGP Code Test Suite
+───────────────────
+  data dir     : /your/path
+  erasure rate : 0.3
+  trials       : 20
+  random seed  : 42
+
+Loaded [[625,25]]:
+  Classical H  : shape=(15, 20)
+  Row weight   : avg=4.0  min=3  max=5
+  Col weight   : avg=3.0  min=3  max=3
+  Hx shape     : (300, 625)
+  Hz shape     : (300, 625)
+  CSS check    : PASS
+
+============================================================
+  HGP code [[625,25]]   N=625 qubits   erasure_rate=0.3   20 trials
+============================================================
+  trial  1  |erasure|= 187  OK  free=0                     ✓
+  trial  2  |erasure|= 187  OK  free=0                     ✓
+  ...
+
+  Summary:
+    consistent   : 20/20
+    with free var: 0/20
+    inconsistent : 0/20
+    result       : PASS
+
+──────────────────────────────────────────────────
+ALL TESTS PASSED
+```
+
+---
+
+## Known Issues and Design Notes
+
+### free_cols behaviour across versions
+
+Different GE versions may report different `free_cols` for the same erasure
+pattern. This occurs because free variables are identified by the absence of a
+pivot, and different pivot orderings (dense column scan vs sorted erasure set)
+can find different — but equally valid — pivot structures.
+
+Both structures yield the same solution vector because free variables default
+to 0 in all versions. The behaviour is **correct and expected**. Only the
+solution vector and consistency verdict are enforced as agreement criteria.
+
+### erasure_index_set must be a Python set
+
+Always pass `erasure_index_set` as a `set`, not a `list`:
+
+```python
+# Correct — sorted() inside v3 gives deterministic column order
+erasure_decode_sparse_v3(H, s, {0, 1, 2, 3})
+
+# Avoid — list iteration order affects which solution is chosen
+erasure_decode_sparse_v3(H, s, [3, 1, 0, 2])
+```
 
 ---
 
