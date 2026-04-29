@@ -553,6 +553,18 @@ The dense implementation above is correct but does not exploit the key property
 of LDPC codes — **H is sparse** (constant row weight w ≪ n). Three progressive
 changes reduce the practical cost from O(n) to O(w) per elimination step.
 
+### Version Summary
+
+| Version | Key difference | Bottleneck removed |
+|---------|---------------|-------------------|
+| **Dense** | Numpy row XOR touches all n columns each step | Row XOR cost O(n) |
+| **Sparse v1** | Rows stored as sets of nonzero indices — XOR becomes symmetric difference | Row XOR reduced to O(w) |
+| **Sparse v2** | Column adjacency dict `col_to_rows[j]` added — pivot search and elimination targeting use direct lookup | Pivot scan O(m) → O(1), elimination targets only rows that actually contain the pivot column |
+| **Sparse v3** | `col_to_rows` and row sets built only for erased columns — non-erased columns never allocated | Construction cost O(n) → O(\|ε\|), gap grows as erasure rate decreases |
+
+Each change is cumulative — v3 includes all three. The recommended version
+for LDPC erasure decoding is **Sparse v3**.
+
 ### Why Sparsity Matters
 
 | Operation | Dense cost | Sparse cost |
