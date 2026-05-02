@@ -11,9 +11,11 @@
 #   3. sparse_ge_v3(H_strategy, ...) if needed   — per trial, residual only
 #
 # Raw stats saved per code family as msgpack binary files.
-# Plot: n_codes rows x 2 columns
-#   Left  — timing (peeling + GE) for all three strategies
-#   Right — peeling success rate for all three strategies
+#
+# Plot: 2x2 grid (one subplot per code family)
+#   Left Y-axis  — avg time per call (ms): peeling + GE for all strategies
+#   Right Y-axis — peeling success rate (%) as single line
+#                  (strategy-independent since only rows are permuted)
 #
 # Usage
 # ─────
@@ -49,13 +51,13 @@ import os
 import argparse
 import msgpack
 import networkx as nx
-from sparse_gaussian_elimination_v3 import erasure_decode_sparse_v3
+from sparse_gaussian_elimination_v3 import erasure_decode_sparse_v3 
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
 
 # ── Experiment parameters ──────────────────────────────────────────────────
-ERASURE_RATES = [round(r, 2) for r in np.arange(0.05, 0.51, 0.05)]
+ERASURE_RATES = [round(r, 2) for r in np.arange(0.05, 0.51, 0.02)]
 N_TRIALS      = 50
 RANDOM_SEED   = 42
 
@@ -84,14 +86,9 @@ STRATEGY_STYLE = {
     "dfs" : {"linestyle": "--", "marker": "s", "label": "DFS"},
     "rcm" : {"linestyle": ":",  "marker": "D", "label": "RCM"},
 }
-COLOR_PEEL = "#e74c3c"   # red   — peeling time (left column)
-COLOR_GE   = "#3498db"   # blue  — GE time      (left column)
-
-STRATEGY_COLOR = {          # colors for success rate lines (right column)
-    "none": "#7f8c8d",
-    "dfs" : "#27ae60",
-    "rcm" : "#9b59b6",
-}
+COLOR_PEEL    = "#e74c3c"   # red  — peeling time
+COLOR_GE      = "#3498db"   # blue — GE time
+COLOR_SUCCESS = "#95a5a6"   # gray — peeling success rate (single line)
 
 
 # ── Reordering strategies ──────────────────────────────────────────────────
@@ -148,9 +145,8 @@ def cm_reorder(H):
     erasure_index_set indices remain valid.
 
     Strategy:
-        1. Build row-row adjacency A where A[i,j]=1 if rows i and j
-           share at least one nonzero column (connected through a variable
-           node in the Tanner graph).
+        1. Build row-row adjacency A where A[i,j]=1 if rows i and j share
+           at least one nonzero column (connected through a variable node).
         2. Apply scipy RCM to A to obtain a bandwidth-minimising permutation.
         3. Permute rows of H accordingly.
 
@@ -161,11 +157,9 @@ def cm_reorder(H):
         H_reordered:   numpy 2D array, dtype=int, shape (m, n)
         cons_ordering: list of int, row permutation applied
     """
-    # Row-row adjacency: two rows are adjacent if they share a column
     A = (H @ H.T).astype(bool).astype(int)
     np.fill_diagonal(A, 0)
-    A_sparse = csr_matrix(A)
-
+    A_sparse      = csr_matrix(A)
     perm          = reverse_cuthill_mckee(A_sparse, symmetric_mode=True)
     cons_ordering = perm.tolist()
     return H[cons_ordering, :], cons_ordering
@@ -316,6 +310,11 @@ def run_benchmark(
         - Reorder Hx ONCE, time recorded as t_reorder_ms
         - Per trial: peeling on H_strategy, GE on residual if needed
         - GE time averaged only over trials where GE was needed
+        - Same erasure pattern used for all strategies per trial
+
+    Peeling success rate is strategy-independent (row permutation only)
+    but stored per strategy for verification. The "none" strategy is used
+    as the reference line in the plot.
 
     Stat file schema per code family:
     {
@@ -361,7 +360,8 @@ def run_benchmark(
     print("───────────────────────────")
     print(f"  code families : {code_names}")
     print(f"  strategies    : {strategy_names}")
-    print(f"  erasure rates : {erasure_rates[0]} to {erasure_rates[-1]}")
+    print(f"  erasure rates : {erasure_rates[0]:.2f} to {erasure_rates[-1]:.2f} "
+          f"step 0.02 ({len(erasure_rates)} points)")
     print(f"  trials        : {n_trials}")
     print(f"  random seed   : {random_seed}")
     print(f"  data dir      : {os.path.abspath(data_dir)}")
@@ -513,17 +513,19 @@ def plot_benchmark(
     plot_file  = "peeling_reorder_benchmark.png",
 ):
     """
-    Load per-family msgpack stat files and produce a figure.
+    Load per-family msgpack stat files and produce a 2×2 figure.
 
-    Layout: n_codes rows × 2 columns
-        Left  — timing: peeling + GE for all strategies
-        Right — peeling success rate for all strategies
+    One subplot per code family:
+        Left Y-axis  — avg time per call (ms): peeling + GE for all strategies
+        Right Y-axis — peeling success rate (%) as single gray line
+                       uses "none" strategy as reference (strategy-independent)
 
     Visual encoding:
-        Color      : red=peeling time, blue=GE time (left)
-                     strategy color (right)
+        Color      : red=peeling time, blue=GE time, gray=success rate
         Line style : solid=none, dashed=dfs, dotted=rcm
         Marker     : o=none, s=dfs, D=rcm
+
+    X-axis ticks: major at 0.10 intervals, minor at every 0.02 point.
 
     Raw data for all strategies preserved in msgpack files.
 
@@ -539,7 +541,8 @@ def plot_benchmark(
     for code_name in code_names:
         stats = load_stats(code_name, stat_dir)
         if stats is None:
-            print(f"  SKIP {code_name}: stat file not found — run --benchmark first")
+            print(f"  SKIP {code_name}: stat file not found — "
+                  f"run --benchmark first")
             continue
         loaded[code_name] = stats
 
@@ -549,24 +552,29 @@ def plot_benchmark(
         )
 
     n_codes = len(loaded)
+    ncols   = 2
+    nrows   = (n_codes + 1) // 2
+
     fig, axes = plt.subplots(
-        n_codes, 2,
-        figsize=(13, 4.5 * n_codes),
+        nrows, ncols,
+        figsize=(13, 5 * nrows),
         squeeze=False,
     )
     fig.suptitle(
         "Peeling + Sparse GE v3 — Reordering Strategy Comparison\n"
-        "Left: avg time per call (ms, linear)   |   "
-        "Right: peeling success rate (%)\n"
+        "Left Y: avg time per call (ms)   |   "
+        "Right Y: peeling success rate (%) — strategy-independent\n"
         "Peeling time = all trials   |   "
         "GE time = GE-needed trials only   |   "
         "t_reorder = one-time cost",
         fontsize=10,
     )
 
-    for row_idx, (code_name, stats) in enumerate(loaded.items()):
-        ax_time    = axes[row_idx][0]
-        ax_success = axes[row_idx][1]
+    axes_flat = [axes[r][c] for r in range(nrows) for c in range(ncols)]
+
+    for ax_idx, (code_name, stats) in enumerate(loaded.items()):
+        ax      = axes_flat[ax_idx]
+        ax_twin = ax.twinx()
 
         erasure_rates  = stats["erasure_rates"]
         n_trials       = stats["n_trials"]
@@ -574,7 +582,7 @@ def plot_benchmark(
         strategies     = stats["strategies"]
         strategy_names = list(strategies.keys())
 
-        # ── Left column — timing ───────────────────────────────────────────
+        # ── Left Y-axis — timing ───────────────────────────────────────────
         for sname in strategy_names:
             style   = STRATEGY_STYLE[sname]
             summary = strategies[sname]["summary"]
@@ -586,7 +594,7 @@ def plot_benchmark(
             n_ge      = np.array(summary["n_ge_trials"])
 
             # Peeling time — all trials
-            ax_time.plot(
+            ax.plot(
                 erasure_rates, peel_mean,
                 color=COLOR_PEEL,
                 linestyle=style["linestyle"],
@@ -594,7 +602,7 @@ def plot_benchmark(
                 linewidth=1, markersize=3,
                 label=f"peel [{style['label']}]",
             )
-            ax_time.fill_between(
+            ax.fill_between(
                 erasure_rates,
                 np.maximum(peel_mean - peel_std, 0),
                 peel_mean + peel_std,
@@ -603,14 +611,14 @@ def plot_benchmark(
 
             # GE time — GE-needed trials only, masked where n_ge == 0
             ge_mask  = n_ge > 0
-            ge_rates = [erasure_rates[i] for i in range(len(erasure_rates))
-                        if ge_mask[i]]
+            ge_rates = [erasure_rates[i]
+                        for i in range(len(erasure_rates)) if ge_mask[i]]
             ge_vals  = ge_mean[ge_mask]
             ge_err   = ge_std[ge_mask]
             ge_n     = n_ge[ge_mask]
 
             if ge_rates:
-                ax_time.plot(
+                ax.plot(
                     ge_rates, ge_vals,
                     color=COLOR_GE,
                     linestyle=style["linestyle"],
@@ -618,7 +626,7 @@ def plot_benchmark(
                     linewidth=1, markersize=3,
                     label=f"GE [{style['label']}]",
                 )
-                ax_time.fill_between(
+                ax.fill_between(
                     ge_rates,
                     np.maximum(ge_vals - ge_err, 0),
                     ge_vals + ge_err,
@@ -626,82 +634,72 @@ def plot_benchmark(
                 )
                 # Annotate n= on each GE data point
                 for r, v, n in zip(ge_rates, ge_vals, ge_n):
-                    ax_time.annotate(
+                    ax.annotate(
                         f"n={n}",
                         xy=(r, v), xytext=(0, 5),
                         textcoords="offset points",
                         fontsize=5, color=COLOR_GE, ha="center",
                     )
 
-        # Title shows t_reorder for each strategy
-        t_str = "   ".join(
+        # ── Right Y-axis — peeling success rate (single line) ─────────────
+        # Use "none" as reference — strategy-independent since only rows
+        # are permuted and peeling success depends on column connectivity only
+        ref_strategy = "none" if "none" in strategies else strategy_names[0]
+        n_peel   = np.array(strategies[ref_strategy]["summary"]["n_peel_only"])
+        peel_pct = n_peel / n_trials * 100
+
+        ax_twin.plot(
+            erasure_rates, peel_pct,
+            color=COLOR_SUCCESS,
+            linestyle="-", linewidth=1.2,
+            label="peeling success %",
+        )
+        ax_twin.set_ylabel("Peeling success rate (%)", fontsize=8,
+                           color=COLOR_SUCCESS)
+        ax_twin.tick_params(axis="y", labelcolor=COLOR_SUCCESS, labelsize=7)
+        ax_twin.set_ylim(-5, 105)
+        ax_twin.yaxis.set_major_formatter(mticker.PercentFormatter())
+
+        # ── t_reorder annotation — text box inside plot ────────────────────
+        t_lines = "\n".join(
             f"{sname}: {strategies[sname]['t_reorder_ms']:.1f}ms"
             for sname in strategy_names
         )
-        ax_time.set_title(
-            f"{label}\nt_reorder — {t_str}",
-            fontsize=9,
+        ax.text(
+            0.02, 0.98,
+            f"t_reorder (one-time)\n{t_lines}",
+            transform=ax.transAxes,
+            fontsize=6, verticalalignment="top",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="gray", alpha=0.8),
         )
-        ax_time.set_xlabel("Erasure rate", fontsize=9)
-        ax_time.set_ylabel("Avg time per call (ms)", fontsize=9)
-        ax_time.set_xticks(erasure_rates)
-        ax_time.tick_params(axis="x", rotation=45, labelsize=7)
-        ax_time.grid(True, linestyle="--", alpha=0.4)
 
-        # ── Right column — peeling success rate ────────────────────────────
-        for sname in strategy_names:
-            style    = STRATEGY_STYLE[sname]
-            n_peel   = np.array(strategies[sname]["summary"]["n_peel_only"])
-            peel_pct = n_peel / n_trials * 100
+        # ── Axes formatting ────────────────────────────────────────────────
+        ax.set_title(label, fontsize=10)
+        ax.set_xlabel("Erasure rate", fontsize=9)
+        ax.set_ylabel("Avg time per call (ms)", fontsize=9)
 
-            ax_success.plot(
-                erasure_rates, peel_pct,
-                color=STRATEGY_COLOR[sname],
-                linestyle=style["linestyle"],
-                marker=style["marker"],
-                linewidth=1, markersize=3,
-                label=style["label"],
-            )
+        # Major ticks at 0.10 intervals, minor ticks at every 0.02 point
+        ax.set_xticks([0.10, 0.20, 0.30, 0.40, 0.50])
+        ax.set_xticks(erasure_rates, minor=True)
+        ax.tick_params(axis="x", which="major", labelsize=8)
+        ax.tick_params(axis="x", which="minor", length=3)
+        ax.grid(True, which="major", linestyle="--", alpha=0.4)
+        ax.grid(True, which="minor", linestyle=":",  alpha=0.2)
 
-        ax_success.set_title(
-            f"{label}\nPeeling success rate",
-            fontsize=9,
+        # ── Combined legend ────────────────────────────────────────────────
+        lines_l, labels_l = ax.get_legend_handles_labels()
+        lines_r, labels_r = ax_twin.get_legend_handles_labels()
+        ax.legend(
+            lines_l + lines_r,
+            labels_l + labels_r,
+            fontsize=7, loc="upper left",
+            ncol=2,
         )
-        ax_success.set_xlabel("Erasure rate", fontsize=9)
-        ax_success.set_ylabel("Peeling success rate (%)", fontsize=9)
-        ax_success.set_ylim(-5, 105)
-        ax_success.yaxis.set_major_formatter(mticker.PercentFormatter())
-        ax_success.set_xticks(erasure_rates)
-        ax_success.tick_params(axis="x", rotation=45, labelsize=7)
-        ax_success.grid(True, linestyle="--", alpha=0.4)
-        ax_success.legend(fontsize=8, loc="upper right")
 
-    # ── Shared legend for first timing subplot ─────────────────────────────
-    first_strategies = list(
-        loaded[list(loaded.keys())[0]]["strategies"].keys()
-    )
-    peel_handles = [
-        mlines.Line2D([], [],
-                      color=COLOR_PEEL,
-                      linestyle=STRATEGY_STYLE[s]["linestyle"],
-                      marker=STRATEGY_STYLE[s]["marker"],
-                      linewidth=1, markersize=4,
-                      label=f"Peel [{STRATEGY_STYLE[s]['label']}]")
-        for s in first_strategies
-    ]
-    ge_handles = [
-        mlines.Line2D([], [],
-                      color=COLOR_GE,
-                      linestyle=STRATEGY_STYLE[s]["linestyle"],
-                      marker=STRATEGY_STYLE[s]["marker"],
-                      linewidth=1, markersize=4,
-                      label=f"GE [{STRATEGY_STYLE[s]['label']}]")
-        for s in first_strategies
-    ]
-    axes[0][0].legend(
-        handles=peel_handles + ge_handles,
-        fontsize=7, loc="upper left", ncol=2,
-    )
+    # Hide unused subplots if n_codes is odd
+    for ax_idx in range(len(loaded), nrows * ncols):
+        axes_flat[ax_idx].set_visible(False)
 
     plt.tight_layout()
     plt.savefig(plot_file, dpi=150, bbox_inches="tight")
