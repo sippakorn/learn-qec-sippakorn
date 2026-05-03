@@ -51,12 +51,10 @@ import os
 import argparse
 import msgpack
 import networkx as nx
-from scipy.sparse import (
-    csr_matrix, eye as speye, kron as spkron,
-    hstack as sphstack, bmat as spbmat,
-)
-from scipy.sparse.csgraph import reverse_cuthill_mckee, depth_first_order
-from sparse_gaussian_elimination_v3 import erasure_decode_sparse_v3
+from sparse_gaussian_elimination_v3 import erasure_decode_sparse_v3 
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import reverse_cuthill_mckee
+
 
 # ── Experiment parameters ──────────────────────────────────────────────────
 ERASURE_RATES = [round(r, 2) for r in np.arange(0.05, 0.51, 0.02)]
@@ -110,104 +108,55 @@ def no_reorder(H):
 
 
 def dfs_reorder(H):
-    """
-    Reorder rows of H using DFS post-order traversal of the Tanner graph.
-    Only rows are permuted — columns stay in original order so that
-    erasure_index_set indices remain valid.
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import depth_first_order
 
-    Uses scipy sparse graph DFS — avoids NetworkX Python overhead.
-    Accepts both dense numpy arrays and scipy sparse matrices.
+    num_rows, num_cols = H.shape
+    H_sparse = csr_matrix(H)
 
-    Strategy:
-        Build bipartite Tanner graph as sparse block matrix:
-            [0    H  ]
-            [H.T  0  ]
-        DFS from node 0 visits check nodes (first num_rows nodes)
-        in a traversal-order permutation.
+    # Build Tanner graph adjacency as sparse matrix
+    # Block structure: [0, H; H.T, 0] — bipartite adjacency
+    from scipy.sparse import bmat, csr_matrix
+    import numpy as np
 
-    Inputs:
-        H: numpy 2D array or scipy sparse matrix, shape (m, n)
+    zero_rr = csr_matrix((num_rows, num_rows), dtype=int)
+    zero_cc = csr_matrix((num_cols, num_cols), dtype=int)
+    tanner  = bmat([[zero_rr, H_sparse],
+                    [H_sparse.T, zero_cc]], format="csr")
 
-    Returns:
-        H_reordered:   same type as H, shape (m, n)
-        cons_ordering: list of int, row permutation applied
-    """
-    H_sp     = csr_matrix(H)
-    num_rows = H_sp.shape[0]
-    num_cols = H_sp.shape[1]
-
-    # Build bipartite adjacency: block [[0, H], [H.T, 0]]
-    zero_rr = csr_matrix((num_rows, num_rows), dtype=np.int8)
-    zero_cc = csr_matrix((num_cols, num_cols), dtype=np.int8)
-    H_int   = H_sp.astype(np.int8)
-    tanner  = spbmat(
-        [[zero_rr, H_int], [H_int.T, zero_cc]], format="csr"
-    )
-
-    # DFS from node 0 — scipy C-level, much faster than NetworkX
+    # DFS from node 0
     node_order, _ = depth_first_order(tanner, i_start=0, directed=False)
 
-    # Check nodes are indices 0..num_rows-1 in the block layout
+    # Extract check node indices (first num_rows nodes in block structure)
     cons_ordering = [i for i in node_order if i < num_rows]
 
-    # Handle disconnected components — any check not reached by DFS
+    # Handle disconnected components — any check not reached by DFS from 0
     visited = set(cons_ordering)
     for i in range(num_rows):
         if i not in visited:
             cons_ordering.append(i)
 
-    if hasattr(H, "toarray"):
-        return H_sp[cons_ordering, :], cons_ordering
-    return np.asarray(H)[cons_ordering, :], cons_ordering
+    return H[cons_ordering, :], cons_ordering
 
 
 def cm_reorder(H):
-    """
-    Reorder rows of H using Reverse Cuthill-McKee (RCM) algorithm.
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import reverse_cuthill_mckee
 
-    RCM minimises matrix bandwidth — nonzeros move closer to the diagonal,
-    reducing fill-in propagation during GE. Only rows are permuted so that
-    erasure_index_set indices remain valid.
+    # Build sparse H once
+    H_sparse = csr_matrix(H)
 
-    Uses sparse matrix multiply throughout — avoids O(m²n) dense computation.
-    Accepts both dense numpy arrays and scipy sparse matrices.
+    # Sparse multiply — only computes nonzero entries
+    # Result is sparse with at most m * w^2 nonzeros
+    A_sparse = (H_sparse @ H_sparse.T).astype(bool)
 
-    Strategy:
-        1. Build sparse row-row adjacency A = (H @ H.T > 0) — two rows
-           are adjacent if they share at least one nonzero column.
-           For (3,4)-regular codes: nnz(A) ≈ m × w² ≪ m²
-        2. Apply scipy RCM to sparse A.
-        3. Permute rows of H accordingly.
-
-    Inputs:
-        H: numpy 2D array or scipy sparse matrix, shape (m, n)
-
-    Returns:
-        H_reordered:   same type as H, shape (m, n)
-        cons_ordering: list of int, row permutation applied
-    """
-    H_sp     = csr_matrix(H)
-    num_rows = H_sp.shape[0]
-
-    # Sparse multiply — O(m × w²) not O(m² × n)
-    A_sparse = (H_sp @ H_sp.T).astype(bool)
+    # Zero the diagonal without converting to dense
     A_sparse.setdiag(0)
     A_sparse.eliminate_zeros()
 
-    # Guard — if adjacency has no nonzeros (all rows disjoint) RCM has
-    # nothing to do. Return identity permutation immediately.
-    if A_sparse.nnz == 0:
-        cons_ordering = list(range(num_rows))
-        if hasattr(H, "toarray"):
-            return H_sp, cons_ordering
-        return np.asarray(H), cons_ordering
-
     perm          = reverse_cuthill_mckee(A_sparse, symmetric_mode=True)
     cons_ordering = perm.tolist()
-
-    if hasattr(H, "toarray"):
-        return H_sp[cons_ordering, :], cons_ordering
-    return np.asarray(H)[cons_ordering, :], cons_ordering
+    return H[cons_ordering, :], cons_ordering
 
 
 # Registry — add new strategies here without changing any other code
@@ -250,163 +199,6 @@ def build_hgp(H_cl):
     return Hx, Hz
 
 
-def build_hgp_sparse(H_cl):
-    """
-    Build HGP CSS code using scipy sparse matrices.
-    Avoids dense np.kron which allocates O(m*n * N) memory.
-
-    Memory: O(nnz) ≈ O(row_weight × N) instead of O(m*n × N).
-    For (3,4)-regular codes at N=27689: ~1.8 MB vs ~6 GB dense.
-
-    Accepts dense numpy H_cl and returns scipy csr_matrix Hx, Hz.
-
-    Inputs:
-        H_cl: numpy 2D array, dtype=int, shape (m, n)
-
-    Returns:
-        Hx: scipy csr_matrix, shape (m*n, N)
-        Hz: scipy csr_matrix, shape (n*m, N)
-    """
-    m, n  = H_cl.shape
-    H_sp  = csr_matrix(H_cl, dtype=np.int8)
-    Im    = speye(m, dtype=np.int8, format="csr")
-    In    = speye(n, dtype=np.int8, format="csr")
-
-    Hx = sphstack([spkron(H_sp, In), spkron(Im, H_sp.T)], format="csr")
-    Hz = sphstack([spkron(In, H_sp), spkron(H_sp.T, Im)], format="csr")
-    return Hx, Hz
-
-
-
-def build_expander(n_vars, left_degree, seed):
-    """
-    Build a random left-regular bipartite expander graph.
-
-    Square construction: n_L = n_R = n_vars.
-    Each left (variable) node has exactly left_degree edges.
-    Right (check) nodes have varying degree (avg = left_degree).
-
-    Returns sparse adjacency matrix G of shape (n_R, n_L) where
-    G[r, l] = 1 if right node r is connected to left node l.
-
-    Inputs:
-        n_vars:      int, number of left (variable) nodes = n_L = n_R
-        left_degree: int, number of edges per left node
-        seed:        int, random seed
-
-    Returns:
-        G: scipy csr_matrix, dtype=int8, shape (n_vars, n_vars)
-    """
-    rng     = np.random.default_rng(seed)
-    n_L     = n_vars
-    n_R     = n_vars
-
-    # Build edge list: each left node l connects to left_degree right nodes
-    rows = []   # right node indices
-    cols = []   # left node indices
-    for l in range(n_L):
-        targets = rng.choice(n_R, size=left_degree, replace=False)
-        for r in targets:
-            rows.append(int(r))
-            cols.append(int(l))
-
-    data = np.ones(len(rows), dtype=np.int8)
-    G    = csr_matrix(
-        (data, (rows, cols)),
-        shape=(n_R, n_L),
-        dtype=np.int8,
-    )
-    return G
-
-
-def ael_amplify(H_cl, G):
-    """
-    AEL (Alon-Edmonds-Luby / Sipser-Spielman) amplification of a
-    classical LDPC code using a bipartite expander graph.
-
-    For each right vertex r of G:
-        Let N(r) = left neighbours of r  (size = deg(r))
-        Apply H_cl locally to the variables indexed by N(r)
-        This contributes m rows to H_amp
-
-    If deg(r) != n_cl (the number of columns of H_cl), we pad or
-    truncate N(r) to match. In the square left-regular construction
-    with left_degree = row_weight, most right nodes see exactly
-    left_degree neighbours which equals n_cl only for small codes.
-
-    For practical use we require deg(r) == H_cl.shape[1] for all r.
-    The build_expander function with left_degree = H_cl.shape[1] / 2
-    and appropriate n_vars satisfies this. Here we use the simpler
-    approach: subsample or pad N(r) to exactly n_cl entries.
-
-    H_amp shape: (n_R × m, n_L)
-    CSS orthogonality: automatic when H_amp is used in build_hgp_sparse.
-
-    Inputs:
-        H_cl: numpy 2D array, dtype=int, shape (m, n_cl)
-        G:    scipy sparse matrix, shape (n_R, n_L) — expander adjacency
-
-    Returns:
-        H_amp: numpy 2D array, dtype=int, shape (n_R * m, n_L)
-    """
-    m, n_cl = H_cl.shape
-    n_R, n_L = G.shape
-    G_csr    = G.tocsr()
-
-    H_amp = np.zeros((n_R * m, n_L), dtype=int)
-
-    for r in range(n_R):
-        # Neighbours of right node r = column indices of row r in G
-        nbrs = G_csr[r].indices.tolist()
-
-        # Pad or subsample to exactly n_cl neighbours
-        rng_local = np.random.default_rng(r)
-        if len(nbrs) < n_cl:
-            # Pad with random additional left nodes not already in nbrs
-            candidates = [l for l in range(n_L) if l not in set(nbrs)]
-            extra = rng_local.choice(
-                candidates,
-                size=min(n_cl - len(nbrs), len(candidates)),
-                replace=False,
-            ).tolist()
-            nbrs = nbrs + extra
-        if len(nbrs) > n_cl:
-            nbrs = rng_local.choice(nbrs, size=n_cl, replace=False).tolist()
-
-        if len(nbrs) != n_cl:
-            # Degenerate case — skip this right vertex
-            continue
-
-        nbrs_sorted = sorted(nbrs)
-
-        # Apply H_cl to variables at nbrs_sorted
-        # H_amp[r*m : (r+1)*m, nbrs_sorted] = H_cl
-        row_start = r * m
-        row_end   = row_start + m
-        for local_col, global_col in enumerate(nbrs_sorted):
-            H_amp[row_start:row_end, global_col] = H_cl[:, local_col]
-
-    return H_amp
-
-
-def get_row_nonzeros(H, i):
-    """
-    Return nonzero column indices of row i.
-    Works on both dense numpy arrays and scipy sparse matrices.
-
-    Inputs:
-        H: numpy 2D array or scipy sparse matrix
-        i: int, row index
-
-    Returns:
-        indices: numpy 1D array of int, nonzero column positions
-    """
-    row = H[i]
-    if hasattr(row, "toarray"):          # scipy sparse row
-        return row.toarray().ravel().nonzero()[0]
-    return np.where(row == 1)[0]         # dense numpy row
-
-
 # ── Peeling decoder ────────────────────────────────────────────────────────
 def peeling_decoder(H, s, erasure_index_set):
     """
@@ -428,21 +220,15 @@ def peeling_decoder(H, s, erasure_index_set):
     check_to_vars = {}
     var_to_checks = {j: set() for j in erasure_index_set}
 
-    # Extract all nonzero positions once — O(nnz), no per-row overhead.
-    # Avoids 13,300+ individual sparse row accesses at large code sizes.
-    if hasattr(H, "tocsr"):
-        rows_nz, cols_nz = H.tocsr().nonzero()
-    else:
-        rows_nz, cols_nz = np.where(H == 1)
-
-    # Build adjacency restricted to erased columns only
-    for i, j in zip(rows_nz, cols_nz):
-        if j not in erasure_index_set:
-            continue
-        if i not in check_to_vars:
-            check_to_vars[i] = set()
-        check_to_vars[i].add(j)
-        var_to_checks[j].add(i)
+    for i in range(H.shape[0]):
+        neighbours = set(
+            j for j in np.where(H[i] == 1)[0]
+            if j in erasure_index_set
+        )
+        if neighbours:
+            check_to_vars[i] = neighbours
+            for j in neighbours:
+                var_to_checks[j].add(i)
 
     syndrome = {i: int(s[i]) for i in check_to_vars}
     dangling  = {i for i, nbrs in check_to_vars.items() if len(nbrs) == 1}
@@ -474,67 +260,6 @@ def peeling_decoder(H, s, erasure_index_set):
         del syndrome[check]
 
     return solution, set(var_to_checks.keys()), syndrome
-
-
-# ── Residual submatrix extraction ─────────────────────────────────────────
-def extract_residual_submatrix(H, residual_erasure):
-    """
-    Extract the submatrix of H relevant to the residual stopping set.
-
-    Restricts H to:
-        Columns : residual_erasure only (sorted)
-        Rows    : only rows with at least one nonzero in residual_erasure
-
-    The result is a dense numpy array — residuals are small (tens to hundreds
-    of bits) so dense representation is appropriate and avoids sparse overhead.
-
-    Inputs:
-        H:                numpy 2D array or scipy sparse matrix, shape (m, n)
-        residual_erasure: set of int, column indices of unresolved erased bits
-
-    Returns:
-        H_sub:       numpy 2D array, dtype=int, shape (n_active, |residual|)
-        active_rows: numpy 1D array of int, original row indices in H_sub
-                     used to extract s_sub = s[active_rows]
-        col_map:     numpy 1D array of int, original column indices
-                     col_map[j] = original column index for H_sub column j
-    """
-    col_map = np.array(sorted(residual_erasure), dtype=int)
-
-    # Find active rows via one-shot nonzero extraction
-    if hasattr(H, "tocsr"):
-        H_csr              = H.tocsr()
-        rows_nz, cols_nz   = H_csr.nonzero()
-    else:
-        rows_nz, cols_nz   = np.where(H == 1)
-
-    residual_set = residual_erasure
-    active_set   = set()
-    for i, j in zip(rows_nz, cols_nz):
-        if j in residual_set:
-            active_set.add(int(i))
-
-    active_rows = np.array(sorted(active_set), dtype=int)
-
-    # Build dense submatrix — small for typical residuals
-    n_active   = len(active_rows)
-    n_cols     = len(col_map)
-    H_sub      = np.zeros((n_active, n_cols), dtype=int)
-
-    # Reverse mapping: original column -> submatrix column index
-    col_to_sub = {int(orig): sub for sub, orig in enumerate(col_map)}
-
-    for sub_row, orig_row in enumerate(active_rows):
-        if hasattr(H, "tocsr"):
-            _, orig_cols = H_csr[int(orig_row)].nonzero()
-        else:
-            orig_cols = np.where(H[int(orig_row)] == 1)[0]
-        for orig_col in orig_cols:
-            oc = int(orig_col)
-            if oc in col_to_sub:
-                H_sub[sub_row, col_to_sub[oc]] = 1
-
-    return H_sub, active_rows, col_map
 
 
 # ── Stat file I/O ──────────────────────────────────────────────────────────

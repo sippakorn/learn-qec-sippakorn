@@ -46,7 +46,6 @@ import time
 import os
 import argparse
 import msgpack
-from sparse_gaussian_elimination_v3 import erasure_decode_sparse_v3 
 
 # Import reorder functions and decoders from existing scripts
 from peeling_reorder_benchmark import (
@@ -55,7 +54,11 @@ from peeling_reorder_benchmark import (
     cm_reorder,
     peeling_decoder,
     build_hgp,
+    build_hgp_sparse,
+    get_row_nonzeros,
+    extract_residual_submatrix,
 )
+from sparse_gaussian_elimination_v3 import erasure_decode_sparse_v3
 # from ge_decoder import erasure_decode_sparse_v3
 
 # ── Experiment parameters ──────────────────────────────────────────────────
@@ -65,10 +68,11 @@ from peeling_reorder_benchmark import (
 # n=50  → N=3869,  n=60  → N=5625,  n=80  → N=10000
 # n=100 → N=15625, n=120 → N=22500, n=150 → N=35044
 CLASSICAL_SIZES = [20, 30, 40, 50, 60, 80, 100, 120, 150]
+# CLASSICAL_SIZES = [20, 30, 40, 50]   # N up to ~10,000
 ROW_WEIGHT      = 4
 COL_WEIGHT      = 3
-ERASURE_RATE    = 0.35
-N_TRIALS        = 10
+ERASURE_RATE    = 0.42
+N_TRIALS        = 50
 N_SEEDS         = 5
 RANDOM_SEED     = 42       # base seed — seed k uses RANDOM_SEED + k
 STAT_FILE       = "stats_scaling_experiment.msgpack"
@@ -152,6 +156,8 @@ def run_scaling_experiment(
     n_seeds         = N_SEEDS,
     random_seed     = RANDOM_SEED,
     stat_file       = STAT_FILE,
+    debug           = False,
+    use_dfs         = True,
 ):
     """
     Benchmark GE speedup from reordering across HGP code sizes.
@@ -199,8 +205,19 @@ def run_scaling_experiment(
         n_seeds:         int, random seed codes per size
         random_seed:     int, base seed — seed k uses random_seed + k*100
         stat_file:       str, output msgpack path
+        use_dfs:         bool, if False excludes DFS strategy — useful at
+                         high erasure rates where DFS slows GE significantly
+                         (default: True)
+        debug:           bool, if True prints per-step timing breakdown
+                         showing t_reorder per strategy, t_peel, and t_ge
+                         for one diagnostic trial before the main loop.
+                         Use to identify which step dominates latency.
+                         Turn off for production runs (default: False).
     """
-    strategy_names = list(REORDER_STRATEGIES.keys())
+    strategy_names = [
+        s for s in REORDER_STRATEGIES.keys()
+        if s != "dfs" or use_dfs
+    ]
 
     print("Scaling Experiment — Reorder Speedup vs N")
     print("──────────────────────────────────────────")
@@ -212,6 +229,8 @@ def run_scaling_experiment(
     print(f"  seeds per size  : {n_seeds}")
     print(f"  base seed       : {random_seed}")
     print(f"  stat file       : {stat_file}")
+    print(f"  use_dfs         : {use_dfs}")
+    print(f"  debug           : {debug}")
     print()
 
     results = []
@@ -224,9 +243,10 @@ def run_scaling_experiment(
         for k in range(n_seeds):
             seed = random_seed + k * 100
             H_cl = make_random_ldpc(n_cl, row_weight, seed=seed)
-            Hx, _  = build_hgp(H_cl)
+            Hx, _  = build_hgp_sparse(H_cl)   # sparse — avoids OOM at large N
             n_rows = Hx.shape[0]
             rng    = np.random.default_rng(seed)
+
 
             print(f"  seed k={k}  Hx={Hx.shape}", end="  ")
 
@@ -242,12 +262,71 @@ def run_scaling_experiment(
                     "t_reorder_ms": t_ms,
                 }
 
+            # ── Debug: per-step timing breakdown (one diagnostic trial) ──
+            if debug:
+                print(f"    [debug] timing breakdown for seed k={k}:")
+                # t_reorder per strategy
+                for sname in strategy_names:
+                    t_ms = reordered[sname]["t_reorder_ms"]
+                    print(f"      t_reorder [{sname:4s}] = {t_ms:8.2f} ms")
+
+                # One diagnostic trial — time peeling and GE separately
+                rng_diag    = np.random.default_rng(seed + 999)
+                n_erased_d  = int(N * erasure_rate)
+                erased_diag = rng_diag.choice(N, size=n_erased_d, replace=False)
+                eset_diag   = set(erased_diag.tolist())
+                sx_diag     = np.zeros(n_rows, dtype=int)
+
+                # Time peeling on original Hx
+                t0 = time.perf_counter()
+                _, res_diag, res_syn_diag = peeling_decoder(
+                    reordered["none"]["H"], sx_diag, eset_diag
+                )
+                t_peel_diag = (time.perf_counter() - t0) * 1000
+
+                if res_diag:
+                    s_res_diag = np.array(
+                        [res_syn_diag.get(i, 0) for i in range(n_rows)],
+                        dtype=int
+                    )
+                    # Extract submatrix
+                    H_sub_d, active_d, _ = extract_residual_submatrix(
+                        reordered["none"]["H"], res_diag
+                    )
+                    s_sub_d     = s_res_diag[active_d]
+                    sub_eras_d  = set(range(H_sub_d.shape[1]))
+
+                    # Time each strategy on submatrix
+                    print(f"      t_peel [none] = {t_peel_diag:8.2f} ms  "
+                          f"|residual| = {len(res_diag)}  "
+                          f"H_sub = {H_sub_d.shape}")
+                    for sname in strategy_names:
+                        fn = REORDER_STRATEGIES[sname]
+                        t0 = time.perf_counter()
+                        H_sub_r_d, _ = fn(H_sub_d)
+                        t_rsub = (time.perf_counter() - t0) * 1000
+                        t0 = time.perf_counter()
+                        erasure_decode_sparse_v3(H_sub_r_d, s_sub_d, sub_eras_d)
+                        t_ge_d = (time.perf_counter() - t0) * 1000
+                        print(f"      t_reorder_sub [{sname:4s}] = {t_rsub:8.2f} ms  "
+                              f"t_ge = {t_ge_d:8.2f} ms  "
+                              f"total = {t_rsub+t_ge_d:8.2f} ms")
+                else:
+                    print(f"      t_peel [none] = {t_peel_diag:8.2f} ms  "
+                          f"peeling fully succeeded (no GE needed)")
+                print()
+
             # Per-strategy raw storage
+            # speedup = (t_reorder_sub + t_ge)[none] / (t_reorder_sub + t_ge)[strategy]
+            # Both t_reorder_sub and t_ge are measured per trial on the residual submatrix
             raw = {
                 sname: {
-                    "t_ge"        : [],
-                    "n_ge_trials" : 0,
-                    "n_peel_only" : 0,
+                    "t_reorder_sub": [],   # reorder submatrix — per trial
+                    "t_ge"         : [],   # GE on reordered submatrix — per trial
+                    "t_total"      : [],   # t_reorder_sub + t_ge — per trial
+                    "n_ge_trials"  : 0,
+                    "n_peel_only"  : 0,
+                    "residual_sizes": [],  # |residual| per GE trial
                 }
                 for sname in strategy_names
             }
@@ -255,53 +334,82 @@ def run_scaling_experiment(
             sx = np.zeros(n_rows, dtype=int)
 
             # Trial loop — same erasure pattern for all strategies
+            # Peeling runs ONCE per trial on original Hx — result shared
             n_erased = int(N * erasure_rate)
             for trial in range(n_trials):
                 erased_bits = rng.choice(N, size=n_erased, replace=False)
                 erasure_set = set(erased_bits.tolist())
 
+                # Peeling on original Hx — untimed, shared across strategies
+                _, residual, res_syn = peeling_decoder(
+                    reordered["none"]["H"], sx, erasure_set
+                )
+
+                if not residual:
+                    for sname in strategy_names:
+                        raw[sname]["n_peel_only"] += 1
+                    continue
+
+                # Reconstruct residual syndrome vector
+                s_res = np.array(
+                    [res_syn.get(i, 0) for i in range(n_rows)],
+                    dtype=int
+                )
+
+                # Extract residual submatrix — shared, untimed
+                H_sub, active_rows, col_map = extract_residual_submatrix(
+                    reordered["none"]["H"], residual
+                )
+                s_sub          = s_res[active_rows]
+                sub_erasure    = set(range(H_sub.shape[1]))
+                n_sub_cols     = H_sub.shape[1]
+
                 for sname in strategy_names:
-                    H_strat = reordered[sname]["H"]
-                    bucket  = raw[sname]
+                    fn     = REORDER_STRATEGIES[sname]
+                    bucket = raw[sname]
 
-                    # Peeling — NOT timed (reordering-independent)
-                    _, residual, res_syn = peeling_decoder(
-                        H_strat, sx, erasure_set
-                    )
+                    # Reorder submatrix — timed
+                    t0 = time.perf_counter()
+                    H_sub_r, _ = fn(H_sub)
+                    t_reorder_sub = (time.perf_counter() - t0) * 1000
 
-                    if residual:
-                        s_res = np.array(
-                            [res_syn.get(i, 0) for i in range(n_rows)],
-                            dtype=int
-                        )
-                        # GE fallback — timed in isolation
-                        t0 = time.perf_counter()
-                        erasure_decode_sparse_v3(H_strat, s_res, residual)
-                        bucket["t_ge"].append(
-                            (time.perf_counter() - t0) * 1000
-                        )
-                        bucket["n_ge_trials"] += 1
-                    else:
-                        bucket["n_peel_only"] += 1
+                    # GE on reordered submatrix — timed
+                    t0 = time.perf_counter()
+                    erasure_decode_sparse_v3(H_sub_r, s_sub, sub_erasure)
+                    t_ge = (time.perf_counter() - t0) * 1000
+
+                    t_total = t_reorder_sub + t_ge
+
+                    bucket["t_reorder_sub"].append(t_reorder_sub)
+                    bucket["t_ge"].append(t_ge)
+                    bucket["t_total"].append(t_total)
+                    bucket["n_ge_trials"]   += 1
+                    bucket["residual_sizes"].append(len(residual))
 
             # Compute per-strategy means
             strategy_block = {}
             for sname in strategy_names:
-                b        = raw[sname]
-                t_ge_mean = float(np.mean(b["t_ge"])) if b["t_ge"] else 0.0
+                b = raw[sname]
+                def mean_or_zero(lst):
+                    return float(np.mean(lst)) if lst else 0.0
                 strategy_block[sname] = {
-                    "t_reorder_ms": float(reordered[sname]["t_reorder_ms"]),
-                    "t_ge"        : [float(x) for x in b["t_ge"]],
-                    "n_ge_trials" : b["n_ge_trials"],
-                    "n_peel_only" : b["n_peel_only"],
-                    "t_ge_mean"   : t_ge_mean,
+                    "t_reorder_full_ms": float(reordered[sname]["t_reorder_ms"]),
+                    "t_reorder_sub"    : [float(x) for x in b["t_reorder_sub"]],
+                    "t_ge"             : [float(x) for x in b["t_ge"]],
+                    "t_total"          : [float(x) for x in b["t_total"]],
+                    "n_ge_trials"      : b["n_ge_trials"],
+                    "n_peel_only"      : b["n_peel_only"],
+                    "residual_sizes"   : b["residual_sizes"],
+                    "t_total_mean"     : mean_or_zero(b["t_total"]),
+                    "t_ge_mean"        : mean_or_zero(b["t_ge"]),
+                    "residual_mean"    : mean_or_zero(b["residual_sizes"]),
                 }
 
-            # Compute speedup ratios for this seed
-            t_none = strategy_block["none"]["t_ge_mean"]
+            # Compute speedup: (reorder_sub + GE)[none] / (reorder_sub + GE)[strategy]
+            t_none = strategy_block["none"]["t_total_mean"]
             speedups = {}
-            for sname in ["dfs", "rcm"]:
-                t_s = strategy_block[sname]["t_ge_mean"]
+            for sname in [s for s in strategy_names if s != "none"]:
+                t_s = strategy_block[sname]["t_total_mean"]
                 speedups[sname] = (
                     float(t_none / t_s) if t_s > 0 else 1.0
                 )
@@ -315,12 +423,17 @@ def run_scaling_experiment(
             })
 
             # Console summary
-            t_none_ms = strategy_block["none"]["t_ge_mean"]
-            n_ge      = strategy_block["none"]["n_ge_trials"]
+            n_ge     = strategy_block["none"]["n_ge_trials"]
+            res_mean = strategy_block["none"]["residual_mean"]
+            t_none_ms = strategy_block["none"]["t_total_mean"]
+            speedup_parts = "  ".join(
+                f"speedup_{sname}={speedups[sname]:.2f}x"
+                for sname in speedups
+            )
             print(
-                f"t_ge_none={t_none_ms:.2f}ms(n={n_ge})  "
-                f"speedup_dfs={speedups['dfs']:.2f}x  "
-                f"speedup_rcm={speedups['rcm']:.2f}x"
+                f"|residual|_mean={res_mean:.0f}  "
+                f"t_total_none={t_none_ms:.2f}ms(n={n_ge})  "
+                f"{speedup_parts}"
             )
 
         print()
@@ -349,22 +462,15 @@ def plot_scaling_experiment(
     """
     Load scaling experiment stats and produce speedup ratio vs N plot.
 
-    For each N, aggregates speedup across n_seeds random codes:
-        mean speedup ± 1 std shown as line + shaded band
-
-    X-axis: N (physical qubit count), log scale
-    Y-axis: speedup ratio vs no-reorder (linear scale)
+    X-axis: N (physical qubit count, log scale)
+    Y-axis: speedup ratio = t_total[none] / t_total[strategy] (linear)
     Lines:  DFS speedup, RCM speedup
+    Bands:  +/- 1 std across n_seeds random codes per N point
     Ref:    horizontal line at 1.0 (no improvement baseline)
-
-    Also annotates t_reorder cost at selected N points for context.
 
     Inputs:
         stat_file: str, path to msgpack file from run_scaling_experiment
         plot_file: str, output PNG path
-
-    Raises:
-        FileNotFoundError if stat_file does not exist
     """
     if not os.path.exists(stat_file):
         raise FileNotFoundError(
@@ -380,47 +486,54 @@ def plot_scaling_experiment(
 
     # Aggregate speedups per N
     from collections import defaultdict
-    speedups_by_N = defaultdict(lambda: {"dfs": [], "rcm": []})
+    speedups_by_N  = defaultdict(lambda: {"dfs": [], "rcm": []})
     t_reorder_by_N = defaultdict(lambda: {"dfs": [], "rcm": [], "none": []})
-    N_values = []
 
     for entry in results:
-        N    = entry["N"]
-        sp   = entry["speedups"]
+        N      = entry["N"]
+        sp     = entry["speedups"]
         strats = entry["strategies"]
-        speedups_by_N[N]["dfs"].append(sp["dfs"])
-        speedups_by_N[N]["rcm"].append(sp["rcm"])
+        speedups_by_N[N]["dfs"].append(sp.get("dfs", 1.0))
+        speedups_by_N[N]["rcm"].append(sp.get("rcm", 1.0))
         for sname in ["none", "dfs", "rcm"]:
             if sname in strats:
                 t_reorder_by_N[N][sname].append(
-                    strats[sname]["t_reorder_ms"]
+                    strats[sname].get("t_reorder_full_ms",
+                    strats[sname].get("t_reorder_ms", 0.0))
                 )
 
     N_sorted = sorted(speedups_by_N.keys())
+
+    if not N_sorted:
+        print("No results found in stat file — nothing to plot.")
+        return
 
     # Compute mean and std per N
     summary = {}
     for N in N_sorted:
         summary[N] = {}
-        for sname in ["dfs", "rcm"]:
+        for sname in list(speedups_by_N[N].keys()):
             vals = speedups_by_N[N][sname]
-            summary[N][sname] = {
-                "mean": float(np.mean(vals)),
-                "std" : float(np.std(vals)),
-            }
+            if vals:
+                summary[N][sname] = {
+                    "mean": float(np.mean(vals)),
+                    "std" : float(np.std(vals)),
+                }
 
     # ── Figure ────────────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(9, 5))
 
     ax.axhline(
         y=1.0, color="#bdc3c7", linestyle="-",
-        linewidth=1, label="no improvement (1.0×)",
+        linewidth=1, label="no improvement (1.0x)",
     )
 
-    for sname in ["dfs", "rcm"]:
+    available = [s for s in ["dfs", "rcm"]
+                 if any(s in summary.get(N, {}) for N in N_sorted)]
+    for sname in available:
         style = STRATEGY_STYLE[sname]
-        means = np.array([summary[N][sname]["mean"] for N in N_sorted])
-        stds  = np.array([summary[N][sname]["std"]  for N in N_sorted])
+        means = np.array([summary[N][sname]["mean"] for N in N_sorted if sname in summary.get(N, {})])
+        stds  = np.array([summary[N][sname]["std"]  for N in N_sorted if sname in summary.get(N, {})])
 
         ax.plot(
             N_sorted, means,
@@ -437,18 +550,18 @@ def plot_scaling_experiment(
             color=style["color"], alpha=0.12,
         )
 
-        # Annotate final speedup value at largest N
-        ax.annotate(
-            f"{means[-1]:.1f}×",
-            xy=(N_sorted[-1], means[-1]),
-            xytext=(8, 0),
-            textcoords="offset points",
-            fontsize=9, color=style["color"],
-        )
+        if len(N_sorted) > 0:
+            ax.annotate(
+                f"{means[-1]:.1f}x",
+                xy=(N_sorted[-1], means[-1]),
+                xytext=(8, 0),
+                textcoords="offset points",
+                fontsize=9, color=style["color"],
+            )
 
-    # Annotate t_reorder for RCM at selected N points
-    # Choose 3 evenly spaced points to avoid clutter
-    annotate_indices = [0, len(N_sorted)//2, len(N_sorted)-1]
+    # Annotate t_reorder_sub cost at selected N points
+    raw_indices      = [0, len(N_sorted)//2, len(N_sorted)-1]
+    annotate_indices = sorted(set(raw_indices))
     for idx in annotate_indices:
         N = N_sorted[idx]
         t_rcm_vals = t_reorder_by_N[N]["rcm"]
@@ -456,51 +569,33 @@ def plot_scaling_experiment(
             t_rcm_mean = float(np.mean(t_rcm_vals))
             rcm_mean   = summary[N]["rcm"]["mean"]
             ax.annotate(
-                f"t_rcm={t_rcm_mean:.0f}ms",
+                f"t_rcm={t_rcm_mean:.1f}ms",
                 xy=(N, rcm_mean),
                 xytext=(0, -14),
                 textcoords="offset points",
                 fontsize=6, color=STRATEGY_STYLE["rcm"]["color"],
                 ha="center",
-                arrowprops=dict(arrowstyle="-", color="gray",
-                                lw=0.5),
+                arrowprops=dict(arrowstyle="-", color="gray", lw=0.5),
             )
 
     ax.set_xscale("log")
     ax.set_xlabel("N (physical qubit count, log scale)", fontsize=11)
-    ax.set_ylabel("Speedup vs no-reorder (×)", fontsize=11)
+    ax.set_ylabel("Speedup vs no-reorder (x)", fontsize=11)
     ax.set_title(
-        "GE Speedup from Reordering vs HGP Code Size\n"
+        "GE Speedup from Submatrix Reordering vs HGP Code Size\n"
         f"Random (3,4)-regular HGP codes  |  "
         f"erasure rate={params['erasure_rate']}  |  "
-        f"{params['n_seeds']} seeds × {params['n_trials']} trials per point  |  "
-        f"GE-needed trials only",
+        f"{params['n_seeds']} seeds x {params['n_trials']} trials per point",
         fontsize=10,
     )
 
-    # Mark N values from Connolly et al. families
-    connolly_N = {625: "[[625,25]]", 1600: "[[1600,64]]", 2025: "[[2025,81]]"}
-    for N_ref, lbl in connolly_N.items():
-        if N_ref in N_sorted:
-            ax.axvline(
-                x=N_ref, color="#e74c3c",
-                linestyle="--", linewidth=0.7, alpha=0.5,
-            )
-            ax.text(
-                N_ref, ax.get_ylim()[0],
-                f" {lbl}",
-                fontsize=6, color="#e74c3c",
-                rotation=90, va="bottom",
-            )
-
-    # X-axis ticks at the actual N values
     ax.set_xticks(N_sorted)
     ax.set_xticklabels(
         [f"{N:,}" for N in N_sorted],
         rotation=30, ha="right", fontsize=8,
     )
     ax.grid(True, which="major", linestyle="--", alpha=0.4)
-    ax.grid(True, which="minor", linestyle=":",  alpha=0.15)
+    ax.grid(True, which="minor", linestyle=":", alpha=0.15)
     ax.legend(fontsize=9, loc="upper left")
 
     plt.tight_layout()
@@ -509,7 +604,6 @@ def plot_scaling_experiment(
     print(f"Plot saved to {plot_file}")
 
 
-# ── Entry point ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
@@ -546,6 +640,23 @@ if __name__ == "__main__":
         "--seed", type=int, default=RANDOM_SEED,
         help=f"Base random seed (default: {RANDOM_SEED})."
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help=(
+            "Print per-step timing breakdown (t_reorder, t_peel, t_ge) "
+            "for one diagnostic trial per seed. "
+            "Use to identify which step dominates latency. "
+            "Turn off for production runs."
+        )
+    )
+    parser.add_argument(
+        "--no-dfs", action="store_true",
+        help=(
+            "Exclude DFS reordering strategy from the experiment. "
+            "Useful at high erasure rates where DFS slows GE significantly. "
+            "When set, only none and rcm strategies are benchmarked."
+        )
+    )
     args = parser.parse_args()
 
     if not args.benchmark and not args.plot:
@@ -558,6 +669,8 @@ if __name__ == "__main__":
             n_seeds     = args.seeds,
             random_seed = args.seed,
             stat_file   = args.stat_file,
+            debug       = args.debug,
+            use_dfs     = not args.no_dfs,
         )
 
     if args.plot:
