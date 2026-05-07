@@ -1,4 +1,13 @@
 import numpy as np
+
+# Try to import M4RI backend — falls back to numpy uint8 GE if unavailable
+try:
+    from ge_m4ri import ge_f2_m4ri as _ge_backend
+    _BACKEND = "m4ri"
+except ImportError:
+    _ge_backend = None
+    _BACKEND = "numpy"
+
 from gaussian_elimination import make_augmented_matrix, print_matrix, xor_rows
 from sparse_gaussian_elimination import make_sparse_matrix, print_sparse_matrix, xor_rows_sparse, read_solution_sparse
 from sparse_gaussian_elimination_v2 import make_col_to_rows, xor_rows_sparse_v2
@@ -93,20 +102,19 @@ def erasure_decode_sparse_v3(H, s, erasure_index_set):
     """
     n_vars = H.shape[1]
 
-    # ── Fast path: numpy uint8 GE when H is already a dense submatrix ────
+    # ── Fast path: M4RI or numpy uint8 GE on dense submatrix ───────────
     # Detected when erasure_index_set covers all columns of H.
     # This is always true for submatrices from extract_residual_submatrix.
     if len(erasure_index_set) == n_vars and erasure_index_set == set(range(n_vars)):
-        sol, ok, free_local = ge_f2_numpy_uint8(H, s)
-        # free_local is 0-indexed into H_sub columns — map back to original
-        free_cols = sorted(erasure_index_set)   # identity mapping
+        backend = _ge_backend if _ge_backend is not None else ge_f2_numpy_uint8
+        sol, ok, free_local = backend(H, s)
         if sol is None:
             return None, False, list(erasure_index_set)
-        # Build full solution vector
-        solution = np.zeros(n_vars, dtype=int)
+        solution  = np.zeros(n_vars, dtype=int)
+        col_list  = sorted(erasure_index_set)
         for j in range(n_vars):
             solution[j] = sol[j]
-        free_cols = [sorted(erasure_index_set)[j] for j in free_local]
+        free_cols = [col_list[j] for j in free_local]
         return solution, ok, free_cols
 
     # ── Slow path: original sparse set-based GE ───────────────────────────
