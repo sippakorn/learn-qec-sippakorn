@@ -224,3 +224,5 @@ azure_config.toml
 
 rawdata/
 records_replay/data/
+node_modules/
+webapp/node_modules/
