@@ -1,0 +1,50 @@
+name: Build and Deploy Webapp
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "webapp/**"
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Install dependencies
+        working-directory: webapp
+        run: npm ci
+
+      - name: Build (standalone)
+        working-directory: webapp
+        run: npm run build
+        env:
+          # Runtime-only — these placeholders satisfy the TypeScript compiler
+          # but the build never connects to Azure (all routes are force-dynamic)
+          REDACTED: placeholder
+          AZURE_BLOB_CONTAINER: replay-data
+          AZURE_TABLE_NAME: sessions
+
+      - name: Assemble deployment package
+        # Standalone output doesn't include public/ or static assets — copy them in
+        run: |
+          cp -r webapp/public          webapp/.next/standalone/public
+          cp -r webapp/.next/static    webapp/.next/standalone/.next/static
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: app-ge-record-replay
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: webapp/.next/standalone
+          startup-command: node server.js
