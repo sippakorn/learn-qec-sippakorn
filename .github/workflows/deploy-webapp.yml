@@ -42,7 +42,7 @@ jobs:
           cp -r webapp/.next/static    webapp/.next/standalone/.next/static
 
       - name: Deploy to Azure App Service
-        uses: azure/webapps-deploy@v3
+        uses: azure/webapps-deploy@v2
         with:
           app-name: app-ge-record-replay
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
