@@ -7,6 +7,10 @@ on:
       - "webapp/**"
   workflow_dispatch:
 
+permissions:
+  id-token: write   # required for OIDC login
+  contents: read
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -29,22 +33,36 @@ jobs:
         working-directory: webapp
         run: npm run build
         env:
-          # Runtime-only — these placeholders satisfy the TypeScript compiler
-          # but the build never connects to Azure (all routes are force-dynamic)
           AZURE_STORAGE_CONNECTION_STRING: placeholder
           AZURE_BLOB_CONTAINER: replay-data
           AZURE_TABLE_NAME: sessions
 
       - name: Assemble deployment package
-        # Standalone output doesn't include public/ or static assets — copy them in
         run: |
-          cp -r webapp/public          webapp/.next/standalone/public
-          cp -r webapp/.next/static    webapp/.next/standalone/.next/static
+          cp -r webapp/public       webapp/.next/standalone/public
+          cp -r webapp/.next/static webapp/.next/standalone/.next/static
+          cd webapp/.next/standalone
+          zip -r ../../../deploy.zip .
 
-      - name: Deploy to Azure App Service
-        uses: azure/webapps-deploy@v2
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
         with:
-          app-name: app-ge-record-replay
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: webapp/.next/standalone
-          startup-command: node server.js
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set startup command
+        run: |
+          az webapp config set \
+            --name app-ge-record-replay \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --startup-file "node server.js"
+
+      - name: Deploy zip to App Service
+        run: |
+          az webapp deploy \
+            --name app-ge-record-replay \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --src-path deploy.zip \
+            --type zip \
+            --async false
