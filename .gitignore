@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Azure credentials (copy from azure_config.toml.example and fill in values)
+azure_config.toml
+
+rawdata/
+records_replay/data/
+node_modules/
+webapp/node_modules/
+
+.env.local
+webapp/.env.local
+
+.next/
+webapp/.next/
