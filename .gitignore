@@ -226,3 +226,9 @@ rawdata/
 records_replay/data/
 node_modules/
 webapp/node_modules/
+
+.env.local
+webapp/.env.local
+
+.next/
+webapp/.next/
