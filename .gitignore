@@ -221,3 +221,6 @@ __marimo__/
 
 # Azure credentials (copy from azure_config.toml.example and fill in values)
 azure_config.toml
+
+rawdata/
+records_replay/data/
