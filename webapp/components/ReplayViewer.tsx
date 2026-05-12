@@ -5,8 +5,9 @@ import useSWR from "swr";
 import MatrixHeatmap from "./MatrixHeatmap";
 import EventInfoPanel from "./EventInfoPanel";
 import PlaybackControls from "./PlaybackControls";
+import SessionAnnotation from "./SessionAnnotation";
 import type { SessionMeta } from "@/lib/azure-table";
-import type { StepResult } from "@/lib/replayer";
+import type { Annotation, StepResult } from "@/lib/replayer";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -21,8 +22,13 @@ export default function ReplayViewer({ sessions }: Props) {
   const [speed, setSpeed]         = useState(1000);
   const intervalRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Session metadata (total_steps etc.)
-  const { data: info } = useSWR<{ totalSteps: number; nCheckpoints: number; shape: [number, number] }>(
+  // Session metadata (total_steps, shape, annotation)
+  const { data: info } = useSWR<{
+    totalSteps:   number;
+    nCheckpoints: number;
+    shape:        [number, number];
+    annotation:   Annotation | null;
+  }>(
     sessionId ? `/api/sessions/${sessionId}/info` : null,
     fetcher
   );
@@ -114,6 +120,9 @@ export default function ReplayViewer({ sessions }: Props) {
           <div className="text-xs text-gray-600">
             <span className="text-yellow-400">■</span> Changed since previous step
           </div>
+          <hr className="border-[#2a2a4a] my-4" />
+          <div className="font-bold text-gray-400 mb-2 text-sm">Session annotation</div>
+          <SessionAnnotation annotation={info?.annotation ?? null} />
         </div>
       </div>
 
