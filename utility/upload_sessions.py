@@ -101,8 +101,11 @@ def upload_session_blobs(
     dry_run: bool,
     skip_existing: bool,
 ) -> int:
-    """Upload all msgpack files for one session. Returns number of files uploaded."""
+    """Upload all msgpack files and metadata.json for one session. Returns number of files uploaded."""
     files = sorted(session_dir.glob("*.msgpack"))
+    meta_file = session_dir / "metadata.json"
+    if meta_file.exists():
+        files = [meta_file] + files
     uploaded = 0
 
     for local_path in files:

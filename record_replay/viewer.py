@@ -10,6 +10,13 @@ import json
 from pathlib import Path
 from typing import Optional
 
+METADATA_LABELS = {
+    "code_family":  "Code family",
+    "erasure_rate": "Erasure rate",
+    "reorder":      "Reorder",
+    "note":         "Note",
+}
+
 import numpy as np
 import plotly.graph_objects as go
 from dash import (
@@ -52,6 +59,13 @@ def list_sessions(data_dir: Path) -> list[str]:
         reverse=True,
     )
     return [d.name.removeprefix("session_") for d in dirs]
+
+
+def load_metadata(session_id: str) -> dict:
+    path = _DATA_DIR / f"session_{session_id}" / "metadata.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return {}
 
 
 def get_replayer(session_id: str) -> Replayer:
@@ -257,6 +271,11 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                         html.Span("■ ", style={"color": "rgba(255,185,0,0.8)"}),
                         "Changed since previous step",
                     ], style={"fontSize": "0.75rem", "color": "#777"}),
+                    html.Hr(style={"borderColor": "#2a2a4a", "margin": "14px 0 8px"}),
+                    html.Div("Session annotation",
+                             style={"fontWeight": "bold", "marginBottom": "8px",
+                                    "color": "#aaa", "fontSize": "0.82rem"}),
+                    html.Div(id="session-annotation"),
                 ]),
             ]),
 
@@ -292,6 +311,27 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
         ],
     )
 
+    # ── helpers ───────────────────────────────────────────────────────────
+
+    def _build_annotation(session_id: str):
+        meta = load_metadata(session_id)
+        if not meta:
+            return html.Span("No annotation — run annotate.py to add one.",
+                             style={"color": "#555", "fontSize": "0.75rem"})
+        rows = []
+        for key, label in METADATA_LABELS.items():
+            if key not in meta:
+                continue
+            val = meta[key]
+            if key == "erasure_rate":
+                val = f"{val:.2f}"
+            rows.append(html.Div([
+                html.Span(label + ":", style={"color": "#777", "marginRight": "6px",
+                                              "minWidth": "80px", "display": "inline-block"}),
+                html.Span(str(val), style={"color": "#f0c040"}),
+            ], style={"fontSize": "0.78rem", "marginBottom": "3px"}))
+        return rows
+
     # ── callbacks ─────────────────────────────────────────────────────────
 
     @app.callback(
@@ -299,16 +339,18 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
         Output("step-slider", "marks"),
         Output("step-slider", "value"),
         Output("session-stats", "children"),
+        Output("session-annotation", "children"),
         Input("session-dropdown", "value"),
     )
     def on_session_change(session_id: str):
         if not session_id:
-            return 1, {0: "0", 1: "1"}, 0, ""
+            return 1, {0: "0", 1: "1"}, 0, "", ""
         rep = get_replayer(session_id)
         total = rep.total_steps()
         nckpt = len(rep._ckpt_steps)
         stats = f"{total:,} steps · {nckpt} checkpoints · checkpoint every 50 steps"
-        return total, _slider_marks(total), 0, stats
+        annotation = _build_annotation(session_id)
+        return total, _slider_marks(total), 0, stats, annotation
 
     @app.callback(
         Output("matrix-graph", "figure"),

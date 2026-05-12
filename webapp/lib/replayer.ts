@@ -11,7 +11,7 @@
  *   eventAt(N) = the event that caused transition N-1 → N
  */
 
-import { downloadBlob, listBlobs } from "./azure-blob";
+import { downloadBlob, downloadBlobOptional, listBlobs } from "./azure-blob";
 import { decodeCsr, decodeEvents, CsrMatrix, EventRecord } from "./msgpack-decode";
 
 // ---------------------------------------------------------------------------
@@ -257,12 +257,28 @@ export async function getStep(sessionId: string, n: number): Promise<StepResult>
   };
 }
 
+export interface Annotation {
+  code_family?:  string;
+  erasure_rate?: number;
+  reorder?:      string;
+  note?:         string;
+}
+
 export async function getSessionInfo(sessionId: string) {
-  const state = await loadSession(sessionId);
+  const [state, metaBuf] = await Promise.all([
+    loadSession(sessionId),
+    downloadBlobOptional(`sessions/${sessionId}/metadata.json`),
+  ]);
+
+  const annotation: Annotation | null = metaBuf
+    ? (JSON.parse(metaBuf.toString("utf-8")) as Annotation)
+    : null;
+
   return {
     sessionId,
     totalSteps:   state.events.length,
     nCheckpoints: state.ckptSteps.length,
     shape:        state.shape,
+    annotation,
   };
 }

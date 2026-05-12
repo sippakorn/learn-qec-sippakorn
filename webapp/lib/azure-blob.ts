@@ -10,6 +10,15 @@ export async function downloadBlob(blobName: string): Promise<Buffer> {
   return containerClient().getBlobClient(blobName).downloadToBuffer();
 }
 
+/** Returns null instead of throwing when the blob does not exist. */
+export async function downloadBlobOptional(blobName: string): Promise<Buffer | null> {
+  try {
+    return await containerClient().getBlobClient(blobName).downloadToBuffer();
+  } catch {
+    return null;
+  }
+}
+
 export async function listBlobs(prefix: string): Promise<string[]> {
   const names: string[] = [];
   for await (const item of containerClient().listBlobsFlat({ prefix })) {
