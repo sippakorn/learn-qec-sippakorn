@@ -155,3 +155,13 @@ def _apply_event(mat: sp.lil_matrix, ed: dict) -> None:
         else:
             mat.rows[target] = []
             mat.data[target] = []
+
+    elif etype == "xor_rows":
+        target, source = p["target"], p["source"]
+        # Symmetric difference of column sets: cols in exactly one of the two
+        # rows become 1; cols in both cancel to 0 (F₂ XOR semantics).
+        tgt_cols = set(mat.rows[target])
+        src_cols = set(mat.rows[source])
+        result = sorted(tgt_cols.symmetric_difference(src_cols))
+        mat.rows[target] = result
+        mat.data[target] = [1.0] * len(result)

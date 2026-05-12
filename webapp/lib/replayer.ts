@@ -86,6 +86,15 @@ function applyEvent(rows: LilMatrix, ev: EventRecord): void {
       }
       break;
     }
+    case "xor_rows": {
+      // F₂ XOR: symmetric difference of column sets — cols in both cancel to 0
+      const tgt = rows[p.target];
+      for (const [col] of rows[p.source]) {
+        if (tgt.has(col)) tgt.delete(col);
+        else tgt.set(col, 1);
+      }
+      break;
+    }
   }
 }
 

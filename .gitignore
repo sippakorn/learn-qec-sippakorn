@@ -224,7 +224,7 @@ __marimo__/
 azure_config.toml
 
 rawdata/
-records_replay/data/
+record_replay/data/
 node_modules/
 webapp/node_modules/
 
