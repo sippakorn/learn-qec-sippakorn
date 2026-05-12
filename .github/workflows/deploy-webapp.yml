@@ -31,7 +31,7 @@ jobs:
         env:
           # Runtime-only — these placeholders satisfy the TypeScript compiler
           # but the build never connects to Azure (all routes are force-dynamic)
-          REDACTED: placeholder
+          AZURE_STORAGE_CONNECTION_STRING: placeholder
           AZURE_BLOB_CONTAINER: replay-data
           AZURE_TABLE_NAME: sessions
 
