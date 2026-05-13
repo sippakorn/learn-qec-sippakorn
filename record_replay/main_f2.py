@@ -285,9 +285,110 @@ def dfs_reorder(H):
 
         first_col.sort()
         new_row_order = [row for _, row in first_col]
+        cons_ordering = new_row_order
         H_reordered = H2[np.ix_(new_row_order, range(num_cols))]
 
-    return H_reordered
+    return H_reordered, cons_ordering, var_ordering
+
+def peeling_decoder(H, s, erasure_index_set):
+    """
+    Peeling decoder for classical linear code over the binary erasure channel.
+
+    Iteratively resolves erased variables by finding dangling checks —
+    check nodes with exactly one erased variable neighbour. When no
+    dangling check exists, peeling is stuck and returns the residual.
+
+    Inputs:
+        H:                 numpy 2D array, dtype=int, shape (m, n)
+        s:                 numpy 1D array, dtype=int, shape (m,)
+        erasure_index_set: set of int, indices of erased bits
+
+    Returns:
+        solution:         numpy 1D array, dtype=int, shape (n,)
+                          resolved bits set to their values,
+                          unresolved bits set to 0
+        residual_erasure: set of int
+                          erased bits not resolved by peeling
+                          empty set means peeling fully succeeded
+        residual_syndrome: dict mapping check_index -> syndrome_bit
+                           syndrome of checks still connected to
+                           residual erasure — needed for GE fallback
+    """
+    n_vars   = H.shape[1]
+    solution = np.zeros(n_vars, dtype=int)
+
+    # ── Step 1 — Build adjacency structures ───────────────────────────────
+    # check_to_vars[i] = set of erased variable indices connected to check i
+    # var_to_checks[j] = set of check indices connected to erased variable j
+    check_to_vars = {}
+    var_to_checks = {j: set() for j in erasure_index_set}
+
+    for i in range(H.shape[0]):
+        neighbours = set(
+            j for j in np.where(H[i] == 1)[0]
+            if j in erasure_index_set
+        )
+        if neighbours:                      # skip checks with no erased neighbours
+            check_to_vars[i] = neighbours
+            for j in neighbours:
+                var_to_checks[j].add(i)
+
+    # ── Step 2 — Working syndrome (mutable copy, only active checks) ──────
+    syndrome = {i: int(s[i]) for i in check_to_vars}
+
+    # ── Step 3 — Initialise dangling queue ────────────────────────────────
+    # Use a set for O(1) membership test and removal
+    dangling = {i for i, nbrs in check_to_vars.items() if len(nbrs) == 1}
+
+    # ── Step 4 — Peeling loop ─────────────────────────────────────────────
+    while dangling:
+
+        # Pop one dangling check
+        check = dangling.pop()
+
+        # Guard: check may have been invalidated by an earlier peel step
+        # (can happen if two dangling checks shared a variable)
+        if check not in check_to_vars:
+            continue
+        if len(check_to_vars[check]) != 1:
+            continue
+
+        # Identify and resolve the single erased variable
+        var          = next(iter(check_to_vars[check]))
+        var_value    = syndrome[check]
+        solution[var] = var_value
+
+        # ── Step 5 — Propagate to neighbouring checks ─────────────────────
+        for neighbour_check in var_to_checks[var]:
+            if neighbour_check == check:
+                continue
+            if neighbour_check not in check_to_vars:
+                continue
+
+            # Update syndrome
+            syndrome[neighbour_check] ^= var_value
+
+            # Remove resolved variable from neighbour
+            check_to_vars[neighbour_check].discard(var)
+
+            # Check if neighbour became dangling
+            if len(check_to_vars[neighbour_check]) == 1:
+                dangling.add(neighbour_check)
+
+            # Check if neighbour became empty (all its variables resolved)
+            elif len(check_to_vars[neighbour_check]) == 0:
+                del check_to_vars[neighbour_check]
+                del syndrome[neighbour_check]
+
+        # ── Step 6 — Remove resolved variable and check from graph ────────
+        del var_to_checks[var]
+        del check_to_vars[check]
+        del syndrome[check]
+
+    # ── Step 7 — Collect residual ─────────────────────────────────────────
+    residual_erasure = set(var_to_checks.keys())
+
+    return solution, residual_erasure, syndrome
 
 
 def _human_bytes(n: int) -> str:
@@ -299,23 +400,7 @@ def _human_bytes(n: int) -> str:
 
 
 def main() -> None:
-    # ------------------------------------------------------------------ #
-    # Build random F₂ matrix and syndrome vector                          #
-    # ------------------------------------------------------------------ #
-    m, n = 80, 100          # rows × columns
-    density = 0.25
-    rng = np.random.default_rng(42)
-
-    H = rng.integers(0, 2, size=(m, n), dtype=np.int32)
-    # Make it sparse-ish to keep the session manageable
-    mask = rng.random(size=(m, n)) < density
-    H = (H * mask).astype(np.int32)
-    s = rng.integers(0, 2, size=m, dtype=np.int32)
-
-    nnz = int(np.count_nonzero(H))
-    print(f"Initial matrix : {m}×{n}, density≈{density:.0%}, nnz={nnz}")
-    print(f"Syndrome vector: {s}")
-
+    rng = np.random.default_rng(RANDOM_SEED)
 
     meta     = CODE_FAMILIES["n625"]
     filepath = os.path.join("codes", meta["file"])
@@ -323,30 +408,55 @@ def main() -> None:
 
     print(f"── {label} ──────────────────────────────────")
 
-    # Load and build
+    # ------------------------------------------------------------------ #
+    # 1. Load classical H and build HGP                                   #
+    # ------------------------------------------------------------------ #
     try:
         H_cl = load_classical_H(filepath)
     except FileNotFoundError as e:
         print(f"  SKIP: {e}\n")
+        return
 
-    Hx, _      = build_hgp(H_cl)
-    Hx_reorder = dfs_reorder(Hx)
-    N          = Hx_reorder.shape[1]
-    rate       = 0.35
+    Hx, _ = build_hgp(H_cl)
+    M, N  = Hx.shape
+    rate  = 0.40
 
-    # Erasure decoding setup: zero out non-erased columns → H_active
+    # ------------------------------------------------------------------ #
+    # 2. Random column erasure                                            #
+    # ------------------------------------------------------------------ #
     n_erased    = int(N * rate)
     erased_bits = rng.choice(N, size=n_erased, replace=False)
     erasure_set = set(erased_bits.tolist())
+    s           = rng.integers(0, 2, size=M, dtype=np.int32)
 
-    H_active = Hx_reorder.copy()
-    for bit_idx in range(N):
-        if bit_idx not in erasure_set:
-            H_active[:, bit_idx] = 0
+    print(f"Matrix shape   : {Hx.shape}, erased bits: {n_erased}/{N} ({rate:.0%})")
 
-    s = (rng.random(size=Hx_reorder.shape[0]) < rate).astype(np.int32)
+    # ------------------------------------------------------------------ #
+    # 3. Peeling decoder on the erased matrix                             #
+    # ------------------------------------------------------------------ #
+    _, residual_erasure, residual_syndrome = peeling_decoder(Hx, s, erasure_set)
+    print(f"After peeling  : {len(residual_erasure)} residual bits, "
+          f"{len(residual_syndrome)} active checks")
 
-    print(f"Matrix shape   : {Hx_reorder.shape}, erased bits: {n_erased}/{N} ({rate:.0%})")
+    if not residual_erasure:
+        print("Peeling fully resolved — nothing left for GE.")
+        return
+
+    # ------------------------------------------------------------------ #
+    # 4. Extract residual submatrix                                       #
+    # ------------------------------------------------------------------ #
+    row_indices = sorted(residual_syndrome.keys())
+    col_indices = sorted(residual_erasure)
+    H_sub = Hx[np.ix_(row_indices, col_indices)]
+    s_sub = np.array([residual_syndrome[i] for i in row_indices], dtype=np.int32)
+
+    # ------------------------------------------------------------------ #
+    # 5. DFS reorder residual submatrix → H_active                       #
+    # ------------------------------------------------------------------ #
+    H_active, row_order, _ = dfs_reorder(H_sub)
+    s_active = s_sub[np.array(row_order)]
+
+    print(f"After reorder  : {H_active.shape}")
 
     # ------------------------------------------------------------------ #
     # Start recording session — initial state is the augmented matrix     #
@@ -355,14 +465,14 @@ def main() -> None:
     recorder = Recorder(data_dir=data_dir)
 
     # The generator builds H_aug internally; we store it as the baseline
-    H_aug_initial = np.hstack((H_active, s[:, np.newaxis])).astype(np.float64)
+    H_aug_initial = np.hstack((H_active, s_active[:, np.newaxis])).astype(np.float64)
     session_id = recorder.start_session(sp.csr_matrix(H_aug_initial))
     print(f"Session started: {session_id}")
 
     # ------------------------------------------------------------------ #
     # Run F₂ GE, emitting events into the recorder                        #
     # ------------------------------------------------------------------ #
-    gen = F2GaussianEliminationGenerator(recorder, H_active, s)
+    gen = F2GaussianEliminationGenerator(recorder, H_active, s_active)
     pivot_cols, free_cols = gen.run()
 
     # ------------------------------------------------------------------ #
