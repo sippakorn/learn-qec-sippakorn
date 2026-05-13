@@ -419,7 +419,7 @@ def main() -> None:
 
     Hx, _ = build_hgp(H_cl)
     M, N  = Hx.shape
-    rate  = 0.40
+    rate  = 0.35
 
     # ------------------------------------------------------------------ #
     # 2. Random column erasure                                            #

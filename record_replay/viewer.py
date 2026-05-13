@@ -146,32 +146,100 @@ def build_figure(step: int, session_id: str) -> go.Figure:
     return fig
 
 
-def build_tanner_figure(step: int, session_id: str) -> go.Figure:
-    """Bipartite Tanner graph of the current matrix state.
+def _layout_tanner(H: np.ndarray):
+    """Compute x positions for a top-bottom Tanner graph with component gaps.
 
-    Rows = variable nodes (left, blue).
-    Cols = check nodes (right, red), last column (syndrome) excluded.
-    a(i, j) = 1  →  edge between v_i and c_j.
-    Node size scales with degree.
+    Uses Union-Find to detect connected components of the bipartite graph.
+    Variable nodes (rows) go to y=1, check nodes (cols) go to y=0.
+    Components are sorted largest-first with a fixed gap between them.
+
+    Returns:
+        var_x:     ndarray (nRows,) — x coord for each variable node
+        chk_x:     ndarray (nCols,) — x coord for each check node
+        x_range:   [float, float]   — xaxis range for the figure
+        fig_width: int              — suggested pixel width (for scrolling)
+    """
+    from collections import defaultdict
+
+    nRows, nCols = H.shape
+    total = nRows + nCols
+
+    parent = list(range(total))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        a, b = find(a), find(b)
+        if a != b:
+            parent[a] = b
+
+    ri, ci = np.where(H != 0)
+    for r, c in zip(ri, ci):
+        union(int(r), nRows + int(c))
+
+    comp_vars: dict = defaultdict(list)
+    comp_chks: dict = defaultdict(list)
+    for i in range(nRows):
+        comp_vars[find(i)].append(i)
+    for j in range(nCols):
+        comp_chks[find(nRows + j)].append(j)
+
+    all_roots = set(comp_vars) | set(comp_chks)
+    components = sorted(
+        all_roots,
+        key=lambda r: len(comp_vars.get(r, [])) + len(comp_chks.get(r, [])),
+        reverse=True,
+    )
+
+    GAP = 3
+    var_x = np.zeros(nRows)
+    chk_x = np.zeros(nCols)
+    x_offset = 0.0
+
+    for root in components:
+        vars_in = sorted(comp_vars.get(root, []))
+        chks_in = sorted(comp_chks.get(root, []))
+        n_v, n_c = len(vars_in), len(chks_in)
+        band = float(max(n_v, n_c, 1))
+
+        for k, i in enumerate(vars_in):
+            var_x[i] = x_offset + (k * (band - 1) / (n_v - 1) if n_v > 1 else (band - 1) / 2)
+        for k, j in enumerate(chks_in):
+            chk_x[j] = x_offset + (k * (band - 1) / (n_c - 1) if n_c > 1 else (band - 1) / 2)
+
+        x_offset += band + GAP
+
+    total_span = x_offset - GAP
+    fig_width = max(800, int(total_span * 18))
+    return var_x, chk_x, [-1.0, total_span + 1.0], fig_width
+
+
+def build_tanner_figure(step: int, session_id: str) -> go.Figure:
+    """Bipartite Tanner graph — variable nodes on top, check nodes on bottom.
+
+    Connected components are laid out side-by-side with a gap between them.
+    The figure width scales with node count for horizontal scrolling.
     """
     rep = get_replayer(session_id)
     mat = rep.get_step(step)
-    H = mat.toarray()[:, :-1]          # strip augmented syndrome column
+    H = mat.toarray()[:, :-1]   # strip augmented syndrome column
     num_rows, num_cols = H.shape
 
-    row_deg = H.sum(axis=1)             # variable-node degrees
-    col_deg = H.sum(axis=0)             # check-node degrees
+    row_deg = H.sum(axis=1)
+    col_deg = H.sum(axis=0)
 
-    # Normalised y positions so both sides span [0, 1]
-    var_y = [i / max(1, num_rows - 1) for i in range(num_rows)]
-    chk_y = [j / max(1, num_cols - 1) for j in range(num_cols)]
+    var_x, chk_x, x_range, fig_width = _layout_tanner(H)
 
     ri, ci = np.where(H != 0)
     edge_x: list = []
     edge_y: list = []
     for r, c in zip(ri, ci):
-        edge_x += [0, 1, None]
-        edge_y += [var_y[r], chk_y[c], None]
+        edge_x += [float(var_x[r]), float(chk_x[c]), None]
+        edge_y += [1.0, 0.0, None]
 
     fig = go.Figure()
 
@@ -184,8 +252,9 @@ def build_tanner_figure(step: int, session_id: str) -> go.Figure:
             showlegend=False,
         ))
 
+    # Variable nodes — top row (y=1)
     fig.add_trace(go.Scatter(
-        x=[0] * num_rows, y=var_y,
+        x=var_x.tolist(), y=[1.0] * num_rows,
         mode="markers",
         marker=dict(
             size=[5 + int(d) for d in row_deg],
@@ -197,8 +266,9 @@ def build_tanner_figure(step: int, session_id: str) -> go.Figure:
         name="variable nodes",
     ))
 
+    # Check nodes — bottom row (y=0)
     fig.add_trace(go.Scatter(
-        x=[1] * num_cols, y=chk_y,
+        x=chk_x.tolist(), y=[0.0] * num_cols,
         mode="markers",
         marker=dict(
             size=[5 + int(d) for d in col_deg],
@@ -217,24 +287,24 @@ def build_tanner_figure(step: int, session_id: str) -> go.Figure:
             x=0.5, font=dict(size=13, color="#ddd"),
         ),
         annotations=[
-            dict(x=0, y=1.04, xref="paper", yref="paper",
-                 text="Variable nodes (rows)", showarrow=False,
+            dict(x=0.5, y=1.13, xref="paper", yref="paper",
+                 text="▲ Variable nodes (rows)", showarrow=False,
                  font=dict(color="#4c8bf5", size=11), xanchor="center"),
-            dict(x=1, y=1.04, xref="paper", yref="paper",
-                 text="Check nodes (cols)", showarrow=False,
+            dict(x=0.5, y=-0.09, xref="paper", yref="paper",
+                 text="▼ Check nodes (cols)", showarrow=False,
                  font=dict(color="#e74c3c", size=11), xanchor="center"),
         ],
-        margin=dict(l=20, r=20, t=60, b=20),
+        margin=dict(l=20, r=20, t=70, b=40),
         height=500,
+        width=fig_width,
+        autosize=False,
         paper_bgcolor="#16213e",
         plot_bgcolor="#16213e",
         font=dict(color="#ccc"),
         showlegend=True,
-        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.04),
-        xaxis=dict(range=[-0.15, 1.15],
-                   showticklabels=False, showgrid=False, zeroline=False),
-        yaxis=dict(showticklabels=False, showgrid=False,
-                   zeroline=False, autorange="reversed"),
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=1.08),
+        xaxis=dict(range=x_range, showticklabels=False, showgrid=False, zeroline=False),
+        yaxis=dict(range=[-0.3, 1.3], showticklabels=False, showgrid=False, zeroline=False),
     )
     return fig
 
@@ -343,8 +413,8 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                             "gap": "10px"},
                      children=[
 
-                # Heatmap
-                html.Div(style=CARD, children=[
+                # Heatmap / Tanner graph (overflowX for wide Tanner graphs)
+                html.Div(style={**CARD, "overflowX": "auto"}, children=[
                     dcc.Graph(id="matrix-graph",
                               config={"displayModeBar": False},
                               style={"height": "510px"}),
