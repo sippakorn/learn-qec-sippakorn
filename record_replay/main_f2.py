@@ -400,7 +400,7 @@ def _human_bytes(n: int) -> str:
 
 
 def main() -> None:
-    rng = np.random.default_rng(RANDOM_SEED)
+    rng = np.random.default_rng()
 
     meta     = CODE_FAMILIES["n625"]
     filepath = os.path.join("codes", meta["file"])
@@ -419,7 +419,7 @@ def main() -> None:
 
     Hx, _ = build_hgp(H_cl)
     M, N  = Hx.shape
-    rate  = 0.35
+    rate  = 0.4
 
     # ------------------------------------------------------------------ #
     # 2. Random column erasure                                            #
