@@ -1,0 +1,68 @@
+name: Build and Deploy Webapp
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "webapp/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for OIDC login
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Install dependencies
+        working-directory: webapp
+        run: npm ci
+
+      - name: Build (standalone)
+        working-directory: webapp
+        run: npm run build
+        env:
+          AZURE_STORAGE_CONNECTION_STRING: placeholder
+          AZURE_BLOB_CONTAINER: replay-data
+          AZURE_TABLE_NAME: sessions
+
+      - name: Assemble deployment package
+        run: |
+          cp -r webapp/public       webapp/.next/standalone/public
+          cp -r webapp/.next/static webapp/.next/standalone/.next/static
+          cd webapp/.next/standalone
+          zip -r ../../../deploy.zip .
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set startup command
+        run: |
+          az webapp config set \
+            --name app-ge-record-replay \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --startup-file "node server.js"
+
+      - name: Deploy zip to App Service
+        run: |
+          az webapp deploy \
+            --name app-ge-record-replay \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --src-path deploy.zip \
+            --type zip \
+            --async false

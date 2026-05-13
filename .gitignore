@@ -15,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!webapp/lib/
 lib64/
 parts/
 sdist/
@@ -218,3 +219,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Azure credentials (copy from azure_config.toml.example and fill in values)
+azure_config.toml
+
+rawdata/
+record_replay/data/
+node_modules/
+webapp/node_modules/
+
+.env.local
+webapp/.env.local
+
+.next/
+webapp/.next/
