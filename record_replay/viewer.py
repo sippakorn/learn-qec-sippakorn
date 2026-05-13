@@ -128,13 +128,24 @@ def build_figure(step: int, session_id: str) -> go.Figure:
         zmax=1,
     ))
 
+    # Square cells: scale so the larger dimension fills MAX_SIDE plot-area pixels
+    MAX_SIDE = 300
+    nRows, nCols = mat_curr.shape
+    cell_px = MAX_SIDE / max(nRows, nCols)
+    plot_w  = max(40, round(nCols * cell_px * 1.5))  # 1.5× wider
+    plot_h  = max(40, round(nRows * cell_px))
+    fig_w   = plot_w + 20   # margin l=10, r=10
+    fig_h   = plot_h + 50   # margin t=40, b=10
+
     fig.update_layout(
         title=dict(
             text=f"Step {step} / {rep.total_steps()}",
             x=0.5, font=dict(size=14, color="#ddd"),
         ),
         margin=dict(l=10, r=10, t=40, b=10),
-        height=500,
+        height=fig_h,
+        width=fig_w,
+        autosize=False,
         paper_bgcolor="#16213e",
         plot_bgcolor="#16213e",
         font=dict(color="#ccc"),
@@ -218,7 +229,7 @@ def _layout_tanner(H: np.ndarray):
     return var_x, chk_x, [-1.0, total_span + 1.0], fig_width
 
 
-def build_tanner_figure(step: int, session_id: str) -> go.Figure:
+def build_tanner_figure(step: int, session_id: str, height: int = 500) -> go.Figure:
     """Bipartite Tanner graph — variable nodes on top, check nodes on bottom.
 
     Connected components are laid out side-by-side with a gap between them.
@@ -295,7 +306,7 @@ def build_tanner_figure(step: int, session_id: str) -> go.Figure:
                  font=dict(color="#e74c3c", size=11), xanchor="center"),
         ],
         margin=dict(l=20, r=20, t=70, b=40),
-        height=500,
+        height=height,
         width=fig_width,
         autosize=False,
         paper_bgcolor="#16213e",
@@ -385,7 +396,7 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                "color": CLR_TEXT},
         children=[
 
-            # ── top bar: session + speed selectors ──────────────────────
+            # ── top bar: session + speed + preview selectors ────────────
             html.Div(style={"display": "flex", "gap": "20px",
                             "alignItems": "flex-end", "marginBottom": "10px"},
                      children=[
@@ -402,25 +413,38 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                                  value=1000, clearable=False,
                                  style={"width": "90px", "color": "#111"}),
                 ]),
+                html.Div([
+                    html.Div("Preview", style=LABEL),
+                    dcc.Dropdown(
+                        id="preview-mode-dropdown",
+                        options=[{"label": "Single", "value": "Single"},
+                                 {"label": "Dual",   "value": "Dual"}],
+                        value="Single",
+                        clearable=False,
+                        style={"width": "100px", "color": "#111"},
+                    ),
+                ]),
                 html.Div(id="session-stats",
                          style={"color": "#777", "fontSize": "0.78rem",
                                 "paddingBottom": "6px"}),
             ]),
 
-            # ── main panel: heatmap + event sidebar ─────────────────────
+            # ── main panel: heatmap + sidebar (always 2 columns) ───────
             html.Div(style={"display": "grid",
                             "gridTemplateColumns": "1fr 260px",
                             "gap": "10px"},
                      children=[
 
-                # Heatmap / Tanner graph (overflowX for wide Tanner graphs)
-                html.Div(style={**CARD, "overflowX": "auto"}, children=[
-                    dcc.Graph(id="matrix-graph",
-                              config={"displayModeBar": False},
-                              style={"height": "510px"}),
+                # Left: heatmap / single tanner — centered, scrollable if wider than cell
+                html.Div(style={**CARD, "overflowX": "auto", "textAlign": "center"}, children=[
+                    html.Div(style={"display": "inline-block"}, children=[
+                        dcc.Graph(id="matrix-graph",
+                                  config={"displayModeBar": False},
+                                  style={}),
+                    ]),
                 ]),
 
-                # Event info panel
+                # Right: Event info panel
                 html.Div(style={**CARD, "fontSize": "0.82rem",
                                 "overflowY": "auto", "maxHeight": "540px"},
                          children=[
@@ -471,6 +495,19 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                                    "background": "#1e3a3a", "borderColor": "#2ecc71",
                                    "color": "#2ecc71"},
                             title="Toggle Tanner graph view"),
+            ]),
+
+            # ── Tanner graph panel — Dual mode only (hidden by default) ──
+            html.Div(id="tanner-dual-container",
+                     style={"display": "none"},
+                     children=[
+                html.Div(style={**CARD, "overflowX": "auto", "textAlign": "center"}, children=[
+                    html.Div(style={"display": "inline-block"}, children=[
+                        dcc.Graph(id="tanner-graph-dual",
+                                  config={"displayModeBar": False},
+                                  style={}),
+                    ]),
+                ]),
             ]),
 
             # ── hidden state stores ──────────────────────────────────────
@@ -527,15 +564,15 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
         Input("step-slider", "value"),
         Input("session-dropdown", "value"),
         Input("view-mode-store", "data"),
+        Input("preview-mode-dropdown", "value"),
     )
-    def update_view(step, session_id: str, view_mode: str):
+    def update_view(step, session_id: str, view_mode: str, preview_mode: str):
         if not session_id:
             return go.Figure(), html.Span("No session loaded.", style={"color": "#888"})
         step = int(step or 0)
-        view_mode = view_mode or "matrix"
-        fig = (build_tanner_figure(step, session_id)
-               if view_mode == "graph"
-               else build_figure(step, session_id))
+        # In Dual mode matrix-graph always shows the heatmap (Tanner is in tanner-graph-dual)
+        show_tanner = (view_mode == "graph") and (preview_mode != "Dual")
+        fig = build_tanner_figure(step, session_id) if show_tanner else build_figure(step, session_id)
         return fig, build_event_info(step, session_id)
 
     @app.callback(
@@ -589,26 +626,54 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
             return maximum
         return no_update
 
+    _BTN_TOGGLE_GRAPH  = {**BTN, "marginLeft": "20px",
+                          "background": "#1e3a3a", "borderColor": "#2ecc71", "color": "#2ecc71"}
+    _BTN_TOGGLE_MATRIX = {**BTN, "marginLeft": "20px",
+                          "background": "#3a1e3a", "borderColor": "#9b59b6", "color": "#9b59b6"}
+    _BTN_TOGGLE_HIDDEN = {**BTN, "marginLeft": "20px", "display": "none"}
+
     @app.callback(
         Output("view-mode-store", "data"),
         Output("graph-toggle-btn", "children"),
         Output("graph-toggle-btn", "style"),
         Input("graph-toggle-btn", "n_clicks"),
         State("view-mode-store", "data"),
+        State("preview-mode-dropdown", "value"),
         prevent_initial_call=True,
     )
-    def toggle_graph_view(_, mode: str):
+    def toggle_graph_view(_, mode: str, preview_mode: str):
+        if preview_mode == "Dual":
+            return no_update, no_update, no_update
         new_mode = "graph" if mode == "matrix" else "matrix"
         if new_mode == "graph":
-            label = "Matrix"
-            style = {**BTN, "marginLeft": "20px",
-                     "background": "#3a1e3a", "borderColor": "#9b59b6",
-                     "color": "#9b59b6"}
+            return new_mode, "Matrix", _BTN_TOGGLE_MATRIX
+        return new_mode, "Graph", _BTN_TOGGLE_GRAPH
+
+    @app.callback(
+        Output("tanner-dual-container", "style"),
+        Output("graph-toggle-btn", "style", allow_duplicate=True),
+        Output("view-mode-store", "data", allow_duplicate=True),
+        Input("preview-mode-dropdown", "value"),
+        prevent_initial_call=True,
+    )
+    def update_preview_mode(preview_mode: str):
+        if preview_mode == "Dual":
+            dual_style   = {}                # visible
+            toggle_style = _BTN_TOGGLE_HIDDEN
         else:
-            label = "Graph"
-            style = {**BTN, "marginLeft": "20px",
-                     "background": "#1e3a3a", "borderColor": "#2ecc71",
-                     "color": "#2ecc71"}
-        return new_mode, label, style
+            dual_style   = {"display": "none"}
+            toggle_style = _BTN_TOGGLE_GRAPH
+        return dual_style, toggle_style, "matrix"
+
+    @app.callback(
+        Output("tanner-graph-dual", "figure"),
+        Input("step-slider", "value"),
+        Input("session-dropdown", "value"),
+        Input("preview-mode-dropdown", "value"),
+    )
+    def update_tanner_dual(step, session_id: str, preview_mode: str):
+        if preview_mode != "Dual" or not session_id:
+            return no_update
+        return build_tanner_figure(int(step or 0), session_id, height=380)
 
     return app

@@ -17,12 +17,13 @@ interface Props {
 }
 
 export default function ReplayViewer({ sessions }: Props) {
-  const [sessionId, setSessionId] = useState(sessions[0]?.sessionId ?? "");
-  const [step, setStep]           = useState(0);
-  const [playing, setPlaying]     = useState(false);
-  const [speed, setSpeed]         = useState(1000);
-  const [viewMode, setViewMode]   = useState<"matrix" | "graph">("matrix");
-  const intervalRef               = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [sessionId,   setSessionId]   = useState(sessions[0]?.sessionId ?? "");
+  const [step,        setStep]        = useState(0);
+  const [playing,     setPlaying]     = useState(false);
+  const [speed,       setSpeed]       = useState(1000);
+  const [viewMode,    setViewMode]    = useState<"matrix" | "graph">("matrix");
+  const [previewMode, setPreviewMode] = useState<"single" | "dual">("single");
+  const intervalRef                   = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Session metadata (total_steps, shape, annotation)
   const { data: info } = useSWR<{
@@ -46,6 +47,9 @@ export default function ReplayViewer({ sessions }: Props) {
 
   // Reset step when session changes
   useEffect(() => { setStep(0); setPlaying(false); }, [sessionId]);
+
+  // Always show heatmap in left slot when switching to Dual
+  useEffect(() => { if (previewMode === "dual") setViewMode("matrix"); }, [previewMode]);
 
   // Auto-advance playback
   useEffect(() => {
@@ -82,6 +86,18 @@ export default function ReplayViewer({ sessions }: Props) {
           </select>
         </div>
 
+        <div>
+          <div className="text-xs text-gray-500 mb-1">Preview</div>
+          <select
+            value={previewMode}
+            onChange={(e) => setPreviewMode(e.target.value as "single" | "dual")}
+            className="bg-[#16213e] text-gray-300 border border-[#334] rounded px-2 py-1 text-sm"
+          >
+            <option value="single">Single</option>
+            <option value="dual">Dual</option>
+          </select>
+        </div>
+
         {info && (
           <div className="text-xs text-gray-500 pb-1">
             {info.totalSteps.toLocaleString()} steps · {info.nCheckpoints} checkpoints ·{" "}
@@ -94,28 +110,28 @@ export default function ReplayViewer({ sessions }: Props) {
         )}
       </div>
 
-      {/* Main panel */}
+      {/* Main panel — always 2 columns (heatmap + sidebar) */}
       <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 260px" }}>
 
-        {/* Heatmap or Tanner graph */}
-        <div className="bg-[#16213e] rounded-md p-3">
+        {/* Left: heatmap always; in Single mode can toggle to Tanner */}
+        <div className="bg-[#16213e] rounded-md p-3 overflow-x-auto">
           {stepData ? (
-            viewMode === "graph" ? (
-              <TannerGraph
-                matrix={stepData.matrix}
-                step={stepData.step}
-                totalSteps={stepData.totalSteps}
-              />
-            ) : (
+            previewMode === "dual" || viewMode === "matrix" ? (
               <MatrixHeatmap
                 matrix={stepData.matrix}
                 changedCells={stepData.changedCells}
                 step={stepData.step}
                 totalSteps={stepData.totalSteps}
               />
+            ) : (
+              <TannerGraph
+                matrix={stepData.matrix}
+                step={stepData.step}
+                totalSteps={stepData.totalSteps}
+              />
             )
           ) : (
-            <div className="h-[510px] flex items-center justify-center text-gray-600">
+            <div className="h-40 flex items-center justify-center text-gray-600">
               {sessionId ? "Loading…" : "Select a session"}
             </div>
           )}
@@ -144,12 +160,29 @@ export default function ReplayViewer({ sessions }: Props) {
           playing={playing}
           speed={speed}
           viewMode={viewMode}
+          previewMode={previewMode}
           onStep={handleStep}
           onTogglePlay={() => setPlaying((p) => !p)}
           onSpeedChange={setSpeed}
           onToggleView={() => setViewMode((m) => m === "matrix" ? "graph" : "matrix")}
         />
       </div>
+
+      {/* Tanner graph panel — Dual mode only, below controls */}
+      {previewMode === "dual" && (
+        <div className="bg-[#16213e] rounded-md p-3 overflow-x-auto">
+          {stepData ? (
+            <TannerGraph
+              matrix={stepData.matrix}
+              step={stepData.step}
+              totalSteps={stepData.totalSteps}
+              height={380}
+            />
+          ) : (
+            <div className="h-40 flex items-center justify-center text-gray-600">Loading…</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

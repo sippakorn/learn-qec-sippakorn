@@ -10,6 +10,7 @@ interface Props {
   matrix: CooMatrix;
   step: number;
   totalSteps: number;
+  height?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ function computeLayout(nVars: number, nChks: number, edgeRows: number[], edgeCol
 // Component
 // ---------------------------------------------------------------------------
 
-export default function TannerGraph({ matrix, step, totalSteps }: Props) {
+export default function TannerGraph({ matrix, step, totalSteps, height = 500 }: Props) {
   const { shape, row, col, data } = matrix;
   const [nRows, nCols] = shape;
   const nVars = nRows;
@@ -149,7 +150,8 @@ export default function TannerGraph({ matrix, step, totalSteps }: Props) {
   });
 
   return (
-    <div style={{ overflowX: "auto", width: "100%" }}>
+    <div style={{ overflowX: "auto", width: "100%", textAlign: "center" }}>
+      <div style={{ display: "inline-block" }}>
       <Plot
         data={traces}
         layout={{
@@ -170,7 +172,7 @@ export default function TannerGraph({ matrix, step, totalSteps }: Props) {
             },
           ],
           margin: { l: 20, r: 20, t: 70, b: 40 },
-          height: 500,
+          height,
           width: figWidth,
           autosize: false,
           paper_bgcolor: "#16213e",
@@ -182,8 +184,9 @@ export default function TannerGraph({ matrix, step, totalSteps }: Props) {
           yaxis: { range: [-0.3, 1.3], showticklabels: false, showgrid: false, zeroline: false },
         }}
         config={{ displayModeBar: false }}
-        style={{ width: figWidth, height: 510 }}
+        style={{ width: figWidth, height: height + 10 }}
       />
+      </div>
     </div>
   );
 }
