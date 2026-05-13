@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import MatrixHeatmap from "./MatrixHeatmap";
+import TannerGraph from "./TannerGraph";
 import EventInfoPanel from "./EventInfoPanel";
 import PlaybackControls from "./PlaybackControls";
 import SessionAnnotation from "./SessionAnnotation";
@@ -20,6 +21,7 @@ export default function ReplayViewer({ sessions }: Props) {
   const [step, setStep]           = useState(0);
   const [playing, setPlaying]     = useState(false);
   const [speed, setSpeed]         = useState(1000);
+  const [viewMode, setViewMode]   = useState<"matrix" | "graph">("matrix");
   const intervalRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Session metadata (total_steps, shape, annotation)
@@ -95,15 +97,23 @@ export default function ReplayViewer({ sessions }: Props) {
       {/* Main panel */}
       <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 260px" }}>
 
-        {/* Heatmap */}
+        {/* Heatmap or Tanner graph */}
         <div className="bg-[#16213e] rounded-md p-3">
           {stepData ? (
-            <MatrixHeatmap
-              matrix={stepData.matrix}
-              changedCells={stepData.changedCells}
-              step={stepData.step}
-              totalSteps={stepData.totalSteps}
-            />
+            viewMode === "graph" ? (
+              <TannerGraph
+                matrix={stepData.matrix}
+                step={stepData.step}
+                totalSteps={stepData.totalSteps}
+              />
+            ) : (
+              <MatrixHeatmap
+                matrix={stepData.matrix}
+                changedCells={stepData.changedCells}
+                step={stepData.step}
+                totalSteps={stepData.totalSteps}
+              />
+            )
           ) : (
             <div className="h-[510px] flex items-center justify-center text-gray-600">
               {sessionId ? "Loading…" : "Select a session"}
@@ -133,9 +143,11 @@ export default function ReplayViewer({ sessions }: Props) {
           totalSteps={totalSteps}
           playing={playing}
           speed={speed}
+          viewMode={viewMode}
           onStep={handleStep}
           onTogglePlay={() => setPlaying((p) => !p)}
           onSpeedChange={setSpeed}
+          onToggleView={() => setViewMode((m) => m === "matrix" ? "graph" : "matrix")}
         />
       </div>
     </div>

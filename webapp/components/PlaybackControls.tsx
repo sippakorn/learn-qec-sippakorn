@@ -5,9 +5,11 @@ interface Props {
   totalSteps: number;
   playing: boolean;
   speed: number;
+  viewMode: "matrix" | "graph";
   onStep: (n: number) => void;
   onTogglePlay: () => void;
   onSpeedChange: (ms: number) => void;
+  onToggleView: () => void;
 }
 
 const SPEED_OPTIONS = [
@@ -20,9 +22,11 @@ const SPEED_OPTIONS = [
 const BTN = "px-3 py-1 bg-[#1e2d50] text-gray-300 border border-[#334] rounded cursor-pointer hover:bg-[#2a3f6e] transition-colors";
 
 export default function PlaybackControls({
-  step, totalSteps, playing, speed,
-  onStep, onTogglePlay, onSpeedChange,
+  step, totalSteps, playing, speed, viewMode,
+  onStep, onTogglePlay, onSpeedChange, onToggleView,
 }: Props) {
+  const isGraph = viewMode === "graph";
+
   return (
     <div className="space-y-3">
       {/* Slider */}
@@ -41,7 +45,7 @@ export default function PlaybackControls({
         <span>{totalSteps.toLocaleString()}</span>
       </div>
 
-      {/* Buttons + speed */}
+      {/* Buttons + speed + view toggle */}
       <div className="flex items-center justify-center gap-2 flex-wrap">
         <button className={BTN} onClick={() => onStep(0)} title="Go to start">⏮</button>
         <button className={BTN} onClick={() => onStep(Math.max(0, step - 1))} title="Previous">◀</button>
@@ -66,6 +70,18 @@ export default function PlaybackControls({
             ))}
           </select>
         </div>
+
+        <button
+          onClick={onToggleView}
+          title="Toggle Tanner graph view"
+          className={
+            isGraph
+              ? "px-3 py-1 border rounded cursor-pointer transition-colors ml-4 bg-[#3a1e3a] border-[#9b59b6] text-[#9b59b6] hover:bg-[#4a2e4a]"
+              : "px-3 py-1 border rounded cursor-pointer transition-colors ml-4 bg-[#1e3a3a] border-[#2ecc71] text-[#2ecc71] hover:bg-[#2e4a3a]"
+          }
+        >
+          {isGraph ? "Matrix" : "Graph"}
+        </button>
       </div>
     </div>
   );

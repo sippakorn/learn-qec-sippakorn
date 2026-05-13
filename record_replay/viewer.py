@@ -146,6 +146,99 @@ def build_figure(step: int, session_id: str) -> go.Figure:
     return fig
 
 
+def build_tanner_figure(step: int, session_id: str) -> go.Figure:
+    """Bipartite Tanner graph of the current matrix state.
+
+    Rows = variable nodes (left, blue).
+    Cols = check nodes (right, red), last column (syndrome) excluded.
+    a(i, j) = 1  →  edge between v_i and c_j.
+    Node size scales with degree.
+    """
+    rep = get_replayer(session_id)
+    mat = rep.get_step(step)
+    H = mat.toarray()[:, :-1]          # strip augmented syndrome column
+    num_rows, num_cols = H.shape
+
+    row_deg = H.sum(axis=1)             # variable-node degrees
+    col_deg = H.sum(axis=0)             # check-node degrees
+
+    # Normalised y positions so both sides span [0, 1]
+    var_y = [i / max(1, num_rows - 1) for i in range(num_rows)]
+    chk_y = [j / max(1, num_cols - 1) for j in range(num_cols)]
+
+    ri, ci = np.where(H != 0)
+    edge_x: list = []
+    edge_y: list = []
+    for r, c in zip(ri, ci):
+        edge_x += [0, 1, None]
+        edge_y += [var_y[r], chk_y[c], None]
+
+    fig = go.Figure()
+
+    if edge_x:
+        fig.add_trace(go.Scatter(
+            x=edge_x, y=edge_y,
+            mode="lines",
+            line=dict(color="rgba(160,160,210,0.22)", width=0.8),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+    fig.add_trace(go.Scatter(
+        x=[0] * num_rows, y=var_y,
+        mode="markers",
+        marker=dict(
+            size=[5 + int(d) for d in row_deg],
+            color="#4c8bf5",
+            line=dict(width=0.5, color="#2a5fc4"),
+        ),
+        customdata=[[i, int(row_deg[i])] for i in range(num_rows)],
+        hovertemplate="v%{customdata[0]}  deg %{customdata[1]}<extra></extra>",
+        name="variable nodes",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[1] * num_cols, y=chk_y,
+        mode="markers",
+        marker=dict(
+            size=[5 + int(d) for d in col_deg],
+            color="#e74c3c",
+            line=dict(width=0.5, color="#c0392b"),
+        ),
+        customdata=[[j, int(col_deg[j])] for j in range(num_cols)],
+        hovertemplate="c%{customdata[0]}  deg %{customdata[1]}<extra></extra>",
+        name="check nodes",
+    ))
+
+    fig.update_layout(
+        title=dict(
+            text=(f"Tanner Graph — Step {step} / {rep.total_steps()}"
+                  f"  ·  {num_rows} var  {num_cols} chk  {len(ri)} edges"),
+            x=0.5, font=dict(size=13, color="#ddd"),
+        ),
+        annotations=[
+            dict(x=0, y=1.04, xref="paper", yref="paper",
+                 text="Variable nodes (rows)", showarrow=False,
+                 font=dict(color="#4c8bf5", size=11), xanchor="center"),
+            dict(x=1, y=1.04, xref="paper", yref="paper",
+                 text="Check nodes (cols)", showarrow=False,
+                 font=dict(color="#e74c3c", size=11), xanchor="center"),
+        ],
+        margin=dict(l=20, r=20, t=60, b=20),
+        height=500,
+        paper_bgcolor="#16213e",
+        plot_bgcolor="#16213e",
+        font=dict(color="#ccc"),
+        showlegend=True,
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.04),
+        xaxis=dict(range=[-0.15, 1.15],
+                   showticklabels=False, showgrid=False, zeroline=False),
+        yaxis=dict(showticklabels=False, showgrid=False,
+                   zeroline=False, autorange="reversed"),
+    )
+    return fig
+
+
 def build_event_info(step: int, session_id: str) -> list:
     rep = get_replayer(session_id)
     ev = rep.event_at(step)
@@ -303,10 +396,16 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                             style={**BTN, "marginLeft": "6px"}, title="Next step"),
                 html.Button("⏭", id="goto-end-btn", n_clicks=0,
                             style={**BTN, "marginLeft": "6px"}, title="Go to end"),
+                html.Button("Graph", id="graph-toggle-btn", n_clicks=0,
+                            style={**BTN, "marginLeft": "20px",
+                                   "background": "#1e3a3a", "borderColor": "#2ecc71",
+                                   "color": "#2ecc71"},
+                            title="Toggle Tanner graph view"),
             ]),
 
             # ── hidden state stores ──────────────────────────────────────
             dcc.Store(id="is-playing-store", data=False),
+            dcc.Store(id="view-mode-store", data="matrix"),
             dcc.Interval(id="interval", interval=1000, disabled=True),
         ],
     )
@@ -357,12 +456,17 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
         Output("event-info", "children"),
         Input("step-slider", "value"),
         Input("session-dropdown", "value"),
+        Input("view-mode-store", "data"),
     )
-    def update_view(step, session_id: str):
+    def update_view(step, session_id: str, view_mode: str):
         if not session_id:
             return go.Figure(), html.Span("No session loaded.", style={"color": "#888"})
         step = int(step or 0)
-        return build_figure(step, session_id), build_event_info(step, session_id)
+        view_mode = view_mode or "matrix"
+        fig = (build_tanner_figure(step, session_id)
+               if view_mode == "graph"
+               else build_figure(step, session_id))
+        return fig, build_event_info(step, session_id)
 
     @app.callback(
         Output("is-playing-store", "data"),
@@ -414,5 +518,27 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
         if trigger == "goto-end-btn":
             return maximum
         return no_update
+
+    @app.callback(
+        Output("view-mode-store", "data"),
+        Output("graph-toggle-btn", "children"),
+        Output("graph-toggle-btn", "style"),
+        Input("graph-toggle-btn", "n_clicks"),
+        State("view-mode-store", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_graph_view(_, mode: str):
+        new_mode = "graph" if mode == "matrix" else "matrix"
+        if new_mode == "graph":
+            label = "Matrix"
+            style = {**BTN, "marginLeft": "20px",
+                     "background": "#3a1e3a", "borderColor": "#9b59b6",
+                     "color": "#9b59b6"}
+        else:
+            label = "Graph"
+            style = {**BTN, "marginLeft": "20px",
+                     "background": "#1e3a3a", "borderColor": "#2ecc71",
+                     "color": "#2ecc71"}
+        return new_mode, label, style
 
     return app
