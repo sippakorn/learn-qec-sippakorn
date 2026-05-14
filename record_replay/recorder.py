@@ -4,13 +4,17 @@ Public API
 ----------
 recorder = Recorder(data_dir="...")
 session_id = recorder.start_session(initial_matrix)
-recorder.record(event)          # append an Event
-recorder.checkpoint(matrix, step)  # persist a full-state snapshot
-summary = recorder.close()      # flush commands.msgpack, return stats
+recorder.record(event)                  # append a pre-built Event
+recorder.record_event(type, params)     # convenience: build + append
+recorder.checkpoint(matrix, step)       # persist a full-state snapshot
+recorder.maybe_checkpoint(mat_provider) # snapshot iff step % INTERVAL == 0
+summary = recorder.close()              # flush commands.msgpack, return stats
 """
 
+import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import scipy.sparse as sp
 
@@ -61,6 +65,27 @@ class Recorder:
         self._events.append(event.to_dict())
         return event
 
+    def record_event(self, event_type: str, params: dict) -> Event:
+        """Build and append an Event from primitive fields.
+
+        Used by the @record_op aspect so algorithm code never has to import
+        the Event class. event_id and step are both set to the current
+        event counter; they advance in lockstep.
+        """
+        if not self._active:
+            raise RuntimeError("Call start_session() before record_event()")
+
+        event = Event(
+            event_id=self._event_counter,
+            event_type=event_type,
+            params=dict(params),
+            timestamp=time.time(),
+            step=self._event_counter,
+        )
+        self._event_counter += 1
+        self._events.append(event.to_dict())
+        return event
+
     def checkpoint(self, matrix: sp.spmatrix, step: int) -> None:
         """Persist a full sparse-matrix snapshot at the given step."""
         if not self._active:
@@ -69,6 +94,22 @@ class Recorder:
         path = self._session_dir / f"checkpoint_{step}.msgpack"
         write_msgpack(path, matrix.tocsr())
         self._checkpoint_count += 1
+
+    def maybe_checkpoint(self, matrix_provider: Callable) -> None:
+        """Snapshot the current matrix when the event counter hits a
+        CHECKPOINT_INTERVAL boundary. matrix_provider is a zero-arg callable
+        returning the current matrix (sparse or dense — coerced to CSR).
+        """
+        if not self._active:
+            return
+        if self._event_counter == 0:
+            return
+        if self._event_counter % CHECKPOINT_INTERVAL != 0:
+            return
+        matrix = matrix_provider()
+        if not sp.issparse(matrix):
+            matrix = sp.csr_matrix(matrix)
+        self.checkpoint(matrix, self._event_counter)
 
     def close(self) -> dict:
         """Flush the command log to disk and return a session summary."""
