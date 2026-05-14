@@ -1,74 +1,41 @@
-"""Gaussian elimination as a recording event generator.
+"""Gaussian elimination on real-valued matrices.
 
-Each row operation is emitted to the Recorder *before* the matrix is mutated,
-so the command log faithfully describes what happened in order.
+Row operations are plain methods decorated with @record_op so they emit
+events when the call site is inside a RecordingSession. Algorithm body
+itself is recorder-agnostic — no Event construction, no recorder field.
 
 Partial pivoting (largest absolute value in the active column) is used for
 numerical stability on real-valued matrices.
 """
 
-import time
-
 import numpy as np
 import scipy.sparse as sp
 
-from events import Event
-from recorder import Recorder, CHECKPOINT_INTERVAL
+from aspects import record_op
 
 
 class GaussianEliminationGenerator:
-    def __init__(self, recorder: Recorder, matrix: sp.spmatrix):
-        self._recorder = recorder
-        # Work on a dense float64 copy; the initial sparse matrix is already
-        # stored as the session baseline by the recorder.
+    def __init__(self, matrix: sp.spmatrix):
+        # Work on a dense float64 copy. The initial sparse matrix is the
+        # session baseline; the caller stores it via recorder.start_session.
         self._mat = matrix.toarray().astype(np.float64)
         self._nrows, self._ncols = self._mat.shape
-        self._step = 0
 
     # ------------------------------------------------------------------
-    # Row operations — emit event then mutate
+    # Row operations — auto-recorded when a RecordingSession is active
     # ------------------------------------------------------------------
 
-    def _swap_rows(self, i: int, j: int) -> None:
-        self._recorder.record(Event(
-            event_id=-1,
-            event_type="swap_rows",
-            params={"row_i": i, "row_j": j},
-            timestamp=time.time(),
-            step=self._step,
-        ))
-        self._mat[[i, j]] = self._mat[[j, i]]
-        self._step += 1
-        self._maybe_checkpoint()
+    @record_op("swap_rows")
+    def _swap_rows(self, row_i: int, row_j: int) -> None:
+        self._mat[[row_i, row_j]] = self._mat[[row_j, row_i]]
 
+    @record_op("scale_row")
     def _scale_row(self, row: int, scalar: float) -> None:
-        self._recorder.record(Event(
-            event_id=-1,
-            event_type="scale_row",
-            params={"row": row, "scalar": float(scalar)},
-            timestamp=time.time(),
-            step=self._step,
-        ))
         self._mat[row] *= scalar
-        self._step += 1
-        self._maybe_checkpoint()
 
+    @record_op("add_scaled_row")
     def _add_scaled_row(self, target: int, source: int, scalar: float) -> None:
-        self._recorder.record(Event(
-            event_id=-1,
-            event_type="add_scaled_row",
-            params={"target": target, "source": source, "scalar": float(scalar)},
-            timestamp=time.time(),
-            step=self._step,
-        ))
         self._mat[target] += scalar * self._mat[source]
-        self._step += 1
-        self._maybe_checkpoint()
-
-    def _maybe_checkpoint(self) -> None:
-        if self._step % CHECKPOINT_INTERVAL == 0:
-            sparse_snapshot = sp.csr_matrix(self._mat)
-            self._recorder.checkpoint(sparse_snapshot, self._step)
 
     # ------------------------------------------------------------------
     # Algorithm

@@ -1,72 +1,47 @@
-"""F₂ Gaussian elimination as a recording event generator.
+"""F₂ Gaussian elimination on the augmented matrix [H | s].
 
-Mirrors forward_eliminate() from core/gaussian_elimination.py exactly,
-emitting events for every row operation on the augmented matrix H_aug = [H|s].
+Row operations are plain methods decorated with @record_op so they emit
+events when called inside a RecordingSession. Algorithm body itself is
+recorder-agnostic — no Event construction, no recorder field.
 
 Events emitted:
   swap_rows  — pivot row swapped into current position
   xor_rows   — source row XORed into target row (F₂ elimination)
 """
 
-import time
-
 import numpy as np
 import scipy.sparse as sp
 
-from events import Event
-from recorder import Recorder, CHECKPOINT_INTERVAL
+from aspects import record_op
 
 
 class F2GaussianEliminationGenerator:
-    def __init__(self, recorder: Recorder, H: np.ndarray, s: np.ndarray):
-        self._recorder = recorder
+    def __init__(self, H: np.ndarray, s: np.ndarray):
         n_vars = H.shape[1]
         self._n_vars = n_vars
 
         # Build augmented matrix [H | s] as float64 for replayer compatibility
-        H_aug = np.hstack((H, s[:, np.newaxis])).astype(np.float64)
-        self._mat = H_aug
-        self._nrows = H_aug.shape[0]
-        self._step = 0
+        self._mat = np.hstack((H, s[:, np.newaxis])).astype(np.float64)
+        self._nrows = self._mat.shape[0]
 
     # ------------------------------------------------------------------
-    # Row operations — emit event then mutate
+    # Row operations — auto-recorded when a RecordingSession is active
     # ------------------------------------------------------------------
 
-    def _swap_rows(self, i: int, j: int) -> None:
-        self._recorder.record(Event(
-            event_id=-1,
-            event_type="swap_rows",
-            params={"row_i": i, "row_j": j},
-            timestamp=time.time(),
-            step=self._step,
-        ))
-        self._mat[[i, j]] = self._mat[[j, i]]
-        self._step += 1
-        self._maybe_checkpoint()
+    @record_op("swap_rows")
+    def _swap_rows(self, row_i: int, row_j: int) -> None:
+        self._mat[[row_i, row_j]] = self._mat[[row_j, row_i]]
 
+    @record_op("xor_rows")
     def _xor_rows(self, target: int, source: int) -> None:
-        self._recorder.record(Event(
-            event_id=-1,
-            event_type="xor_rows",
-            params={"target": target, "source": source},
-            timestamp=time.time(),
-            step=self._step,
-        ))
         self._mat[target] = (self._mat[target] + self._mat[source]) % 2
-        self._step += 1
-        self._maybe_checkpoint()
-
-    def _maybe_checkpoint(self) -> None:
-        if self._step % CHECKPOINT_INTERVAL == 0:
-            self._recorder.checkpoint(sp.csr_matrix(self._mat), self._step)
 
     # ------------------------------------------------------------------
     # Algorithm — mirrors forward_eliminate() from gaussian_elimination.py
     # ------------------------------------------------------------------
 
     def run(self) -> tuple[list[int], list[int]]:
-        """Run Gauss-Jordan elimination over F₂ on H_aug, recording every op.
+        """Run Gauss-Jordan elimination over F₂ on H_aug.
 
         Returns (pivot_cols, free_cols) matching gaussian_elimination_f2().
         """

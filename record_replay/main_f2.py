@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import numpy as np
 import scipy.sparse as sp
 
+from aspects import RecordingSession
 from recorder import Recorder
 from generator_f2 import F2GaussianEliminationGenerator
 
@@ -464,21 +465,20 @@ def main() -> None:
     data_dir = os.path.join(os.path.dirname(__file__), "data")
     recorder = Recorder(data_dir=data_dir)
 
-    # The generator builds H_aug internally; we store it as the baseline
-    H_aug_initial = np.hstack((H_active, s_active[:, np.newaxis])).astype(np.float64)
-    session_id = recorder.start_session(sp.csr_matrix(H_aug_initial))
+    # Construct the generator first; its internal _mat IS the augmented
+    # matrix the session baseline should snapshot.
+    gen = F2GaussianEliminationGenerator(H_active, s_active)
+    session_id = recorder.start_session(sp.csr_matrix(gen._mat))
     print(f"Session started: {session_id}")
 
     # ------------------------------------------------------------------ #
-    # Run F₂ GE, emitting events into the recorder                        #
+    # Run F₂ GE inside a RecordingSession. @record_op on the generator's  #
+    # row-op methods emits events while the session is active.            #
     # ------------------------------------------------------------------ #
-    gen = F2GaussianEliminationGenerator(recorder, H_active, s_active)
-    pivot_cols, free_cols = gen.run()
+    with RecordingSession(recorder, lambda: sp.csr_matrix(gen._mat)) as session:
+        pivot_cols, free_cols = gen.run()
 
-    # ------------------------------------------------------------------ #
-    # Close and report                                                     #
-    # ------------------------------------------------------------------ #
-    summary = recorder.close()
+    summary = session.summary
     total_bytes = sum(summary["file_sizes"].values())
 
     print()

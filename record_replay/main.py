@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import numpy as np
 import scipy.sparse as sp
 
+from aspects import RecordingSession
 from recorder import Recorder
 from generator import GaussianEliminationGenerator
 
@@ -53,15 +54,15 @@ def main() -> None:
     print(f"Session started: {session_id}")
 
     # ------------------------------------------------------------------ #
-    # Run Gaussian elimination, emitting events into the recorder          #
+    # Run Gaussian elimination inside a RecordingSession.                  #
+    # The generator itself is recorder-agnostic; @record_op on its row-op  #
+    # methods emits events while the session is active.                    #
     # ------------------------------------------------------------------ #
-    gen = GaussianEliminationGenerator(recorder, matrix)
-    gen.run()
+    gen = GaussianEliminationGenerator(matrix)
+    with RecordingSession(recorder, lambda: sp.csr_matrix(gen._mat)) as session:
+        gen.run()
 
-    # ------------------------------------------------------------------ #
-    # Close and report                                                     #
-    # ------------------------------------------------------------------ #
-    summary = recorder.close()
+    summary = session.summary
 
     total_bytes = sum(summary["file_sizes"].values())
 
