@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import MatrixHeatmap from "./MatrixHeatmap";
 import TannerGraph from "./TannerGraph";
+import BccTannerGraph from "./BccTannerGraph";
 import EventInfoPanel from "./EventInfoPanel";
 import PlaybackControls from "./PlaybackControls";
 import SessionAnnotation from "./SessionAnnotation";
@@ -22,7 +23,7 @@ export default function ReplayViewer({ sessions }: Props) {
   const [playing,     setPlaying]     = useState(false);
   const [speed,       setSpeed]       = useState(1000);
   const [viewMode,    setViewMode]    = useState<"matrix" | "graph">("matrix");
-  const [previewMode, setPreviewMode] = useState<"single" | "dual">("single");
+  const [previewMode, setPreviewMode] = useState<"single" | "dual">("dual");
   const intervalRef                   = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Session metadata (total_steps, shape, annotation)
@@ -41,6 +42,12 @@ export default function ReplayViewer({ sessions }: Props) {
     sessionId ? `/api/sessions/${sessionId}/step/${step}` : null,
     fetcher,
     { keepPreviousData: true }
+  );
+
+  // Step-0 data for static BCC panel (H_active before GE starts)
+  const { data: bccInitData } = useSWR<StepResult>(
+    sessionId ? `/api/sessions/${sessionId}/step/0` : null,
+    fetcher,
   );
 
   const totalSteps = info?.totalSteps ?? 1;
@@ -168,11 +175,11 @@ export default function ReplayViewer({ sessions }: Props) {
         />
       </div>
 
-      {/* Tanner graph panel — Dual mode only, below controls */}
+      {/* BCC Tanner graph — Dual mode only, updates with each replay step */}
       {previewMode === "dual" && (
         <div className="bg-[#16213e] rounded-md p-3 overflow-x-auto">
           {stepData ? (
-            <TannerGraph
+            <BccTannerGraph
               matrix={stepData.matrix}
               step={stepData.step}
               totalSteps={stepData.totalSteps}
@@ -180,6 +187,33 @@ export default function ReplayViewer({ sessions }: Props) {
             />
           ) : (
             <div className="h-40 flex items-center justify-center text-gray-600">Loading…</div>
+          )}
+        </div>
+      )}
+
+      {/* Static BCC panel — Dual mode only, fixed at initial H_active (step 0) */}
+      {previewMode === "dual" && (
+        <div className="bg-[#16213e] rounded-md p-3 overflow-x-auto">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs text-gray-500">BCC state · initial H_active</span>
+            <a
+              href={`/api/sessions/${sessionId}/bcc`}
+              download={`h_active_${sessionId}.npz`}
+              className="text-xs px-3 py-1 rounded border border-[#334] bg-[#1e2d50] text-gray-300 hover:bg-[#2a3f6e] hover:text-white transition-colors"
+            >
+              ⬇ Download .npz
+            </a>
+          </div>
+          {bccInitData ? (
+            <BccTannerGraph
+              matrix={bccInitData.matrix}
+              step={0}
+              totalSteps={totalSteps}
+              height={280}
+              staticLabel="BCC State (initial H_active)"
+            />
+          ) : (
+            <div className="h-32 flex items-center justify-center text-gray-600">Loading BCC state…</div>
           )}
         </div>
       )}

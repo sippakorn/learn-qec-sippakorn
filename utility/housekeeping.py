@@ -177,9 +177,12 @@ def main() -> None:
     # ── Pick session ────────────────────────────────────────────────────
     print()
     while True:
-        raw = input("Enter session ID or number to delete (q to quit): ").strip()
+        raw = input("Enter session number, ID, 'all' to delete all, or 'q' to quit: ").strip()
         if raw.lower() == "q":
             sys.exit(0)
+        if raw.lower() == "all":
+            _delete_all(sessions, cfg)
+            return
         if raw.isdigit():
             idx = int(raw) - 1
             if 0 <= idx < len(sessions):
@@ -246,6 +249,74 @@ def main() -> None:
     _delete_azure_blobs(cfg, blobs)
     _delete_azure_table_row(cfg, session_id)
     print(f"\nDone. Session {session_id} removed from local and Azure.")
+
+
+# ---------------------------------------------------------------------------
+# Batch delete
+# ---------------------------------------------------------------------------
+
+def _delete_all(sessions: list[str], cfg: dict | None) -> None:
+    summaries = {sid: _session_summary(sid) for sid in sessions}
+    grand_total = sum(s["total_bytes"] for s in summaries.values())
+    grand_files = sum(len(s["files"]) for s in summaries.values())
+
+    print("\n" + "─" * 52)
+    print("  BATCH DELETION SUMMARY — local")
+    print("─" * 52)
+    for sid, s in summaries.items():
+        print(f"\n  Session : {sid}")
+        print(f"  Created : {s['created_at']}")
+        print(f"  Files   : {len(s['files'])}  ({_human_bytes(s['total_bytes'])})")
+    print("\n" + "─" * 52)
+    print(f"  TOTAL   : {len(sessions)} sessions, {grand_files} files, {_human_bytes(grand_total)}")
+    print("─" * 52)
+
+    confirm = input(f"\nType 'delete all' to confirm deletion of all {len(sessions)} sessions: ").strip()
+    if confirm != "delete all":
+        print("Cancelled.")
+        sys.exit(0)
+
+    for sid, s in summaries.items():
+        shutil.rmtree(s["session_dir"])
+        print(f"  Deleted local: {s['session_dir'].name}")
+    print(f"\nAll {len(sessions)} sessions deleted locally.")
+
+    if cfg is None:
+        print("\n(No Azure config found — skipping cloud deletion.)")
+        return
+
+    answer = input("\nAlso delete all sessions from Azure Blob Storage? [y/N]: ").strip().lower()
+    if answer != "y":
+        print("Azure data kept.")
+        return
+
+    print("\n  Listing Azure blobs …")
+    all_blobs: list[str] = []
+    for sid in sessions:
+        try:
+            blobs = _list_azure_blobs(cfg, sid)
+            all_blobs.extend(blobs)
+        except Exception as exc:
+            print(f"  Error listing blobs for {sid}: {exc}")
+
+    if not all_blobs:
+        print("  No blobs found — nothing to delete.")
+        return
+
+    print(f"\n  Blobs to delete ({len(all_blobs)}):")
+    for b in all_blobs:
+        print(f"    {b}")
+
+    confirm = input(f"\nType 'delete all' to confirm Azure deletion: ").strip()
+    if confirm != "delete all":
+        print("  Azure data kept.")
+        return
+
+    print("\n  Deleting from Azure …")
+    _delete_azure_blobs(cfg, all_blobs)
+    for sid in sessions:
+        _delete_azure_table_row(cfg, sid)
+    print(f"\nDone. All {len(sessions)} sessions removed from Azure.")
 
 
 if __name__ == "__main__":

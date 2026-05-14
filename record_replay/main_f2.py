@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+import networkx as nx
 import numpy as np
 import scipy.sparse as sp
 
@@ -241,9 +242,18 @@ def plot_benchmark(
     print(f"Plot saved to {plot_file}")
 
 
-def dfs_reorder(H):
-    import networkx as nx
 
+
+def _save_bcc_state(H, data_dir: str, session_id: str) -> str:
+    """Save H_active to a .npz file in data/bcc_states/. Returns the filename."""
+    bcc_dir = os.path.join(data_dir, "bcc_states")
+    os.makedirs(bcc_dir, exist_ok=True)
+    filename = f"h_active_{session_id}.npz"
+    np.savez_compressed(os.path.join(bcc_dir, filename), H_active=H)
+    return filename
+
+
+def dfs_reorder(H):
     # build bipartite Tanner graph from H, using NetworkX graph representation
     # each variable (column) becomes a node, each constraint (row) is also a node;
     num_rows, num_cols = H.shape
@@ -420,49 +430,58 @@ def main() -> None:
 
     Hx, _ = build_hgp(H_cl)
     M, N  = Hx.shape
-    rate  = 0.4
+    rate  = 0.35
 
     # ------------------------------------------------------------------ #
-    # 2. Random column erasure                                            #
+    # 2-5. Retry erasure until the residual Tanner graph has a cut node  #
     # ------------------------------------------------------------------ #
-    n_erased    = int(N * rate)
-    erased_bits = rng.choice(N, size=n_erased, replace=False)
-    erasure_set = set(erased_bits.tolist())
-    s           = rng.integers(0, 2, size=M, dtype=np.int32)
-
+    n_erased  = int(N * rate)
+    MAX_TRIES = 1000
     print(f"Matrix shape   : {Hx.shape}, erased bits: {n_erased}/{N} ({rate:.0%})")
+    print(f"Searching for an erasure instance with cut nodes (max {MAX_TRIES} tries) …")
 
-    # ------------------------------------------------------------------ #
-    # 3. Peeling decoder on the erased matrix                             #
-    # ------------------------------------------------------------------ #
-    _, residual_erasure, residual_syndrome = peeling_decoder(Hx, s, erasure_set)
-    print(f"After peeling  : {len(residual_erasure)} residual bits, "
-          f"{len(residual_syndrome)} active checks")
+    H_active = s_active = None
+    for attempt in range(1, MAX_TRIES + 1):
+        erased_bits = rng.choice(N, size=n_erased, replace=False)
+        erasure_set = set(erased_bits.tolist())
+        s           = rng.integers(0, 2, size=M, dtype=np.int32)
 
-    if not residual_erasure:
-        print("Peeling fully resolved — nothing left for GE.")
+        _, residual_erasure, residual_syndrome = peeling_decoder(Hx, s, erasure_set)
+        if not residual_erasure:
+            continue  # fully peeled — no stopping set, try again
+
+        row_indices = sorted(residual_syndrome.keys())
+        col_indices = sorted(residual_erasure)
+        H_sub = Hx[np.ix_(row_indices, col_indices)]
+        s_sub = np.array([residual_syndrome[i] for i in row_indices], dtype=np.int32)
+
+        H_reordered, row_order, _ = dfs_reorder(H_sub)
+        s_reordered = s_sub[np.array(row_order)]
+
+        # Build Tanner graph and look for articulation points (cut nodes)
+        G = nx.Graph()
+        ri, ci = np.where(H_reordered != 0)
+        for i, j in zip(ri.tolist(), ci.tolist()):
+            G.add_edge(("c", i), ("v", j))
+        cut_nodes = list(nx.articulation_points(G))
+
+        if cut_nodes:
+            H_active = H_reordered
+            s_active = s_reordered
+            print(f"  Found on attempt {attempt}: "
+                  f"{H_active.shape}, {len(cut_nodes)} cut node(s): "
+                  f"{[f'{k}{v}' for k, v in cut_nodes]}")
+            break
+
+    if H_active is None:
+        print(f"No erasure with cut nodes found after {MAX_TRIES} attempts — giving up.")
         return
-
-    # ------------------------------------------------------------------ #
-    # 4. Extract residual submatrix                                       #
-    # ------------------------------------------------------------------ #
-    row_indices = sorted(residual_syndrome.keys())
-    col_indices = sorted(residual_erasure)
-    H_sub = Hx[np.ix_(row_indices, col_indices)]
-    s_sub = np.array([residual_syndrome[i] for i in row_indices], dtype=np.int32)
-
-    # ------------------------------------------------------------------ #
-    # 5. DFS reorder residual submatrix → H_active                       #
-    # ------------------------------------------------------------------ #
-    H_active, row_order, _ = dfs_reorder(H_sub)
-    s_active = s_sub[np.array(row_order)]
-
-    print(f"After reorder  : {H_active.shape}")
 
     # ------------------------------------------------------------------ #
     # Start recording session — initial state is the augmented matrix     #
     # ------------------------------------------------------------------ #
     data_dir = os.path.join(os.path.dirname(__file__), "data")
+
     recorder = Recorder(data_dir=data_dir)
 
     # Construct the generator first; its internal _mat IS the augmented
@@ -470,6 +489,9 @@ def main() -> None:
     gen = F2GaussianEliminationGenerator(H_active, s_active)
     session_id = recorder.start_session(sp.csr_matrix(gen._mat))
     print(f"Session started: {session_id}")
+
+    fname = _save_bcc_state(H_active, data_dir, session_id)
+    print(f"State saved    : {fname}")
 
     # ------------------------------------------------------------------ #
     # Run F₂ GE inside a RecordingSession. @record_op on the generator's  #

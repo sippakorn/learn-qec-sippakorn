@@ -132,6 +132,37 @@ def upload_session_blobs(
     return uploaded
 
 
+def upload_bcc_state_blob(
+    session_id: str,
+    bcc_dir: Path,
+    container_client,
+    *,
+    dry_run: bool,
+    skip_existing: bool,
+) -> int:
+    """Upload the BCC state file for a session if it exists. Returns 0 or 1."""
+    local_path = bcc_dir / f"h_active_{session_id}.npz"
+    if not local_path.exists():
+        print(f"    (no BCC state file for {session_id} — skipping)")
+        return 0
+
+    blob_name = f"bcc_states/h_active_{session_id}.npz"
+
+    if skip_existing and not dry_run:
+        blob = container_client.get_blob_client(blob_name)
+        if blob.exists():
+            print(f"    skip  {blob_name}  (already exists)")
+            return 0
+
+    size_kb = local_path.stat().st_size / 1024
+    print(f"    {'[dry] ' if dry_run else ''}upload  {blob_name}  ({size_kb:.1f} KB)")
+
+    if not dry_run:
+        with open(local_path, "rb") as fh:
+            container_client.upload_blob(name=blob_name, data=fh, overwrite=True)
+    return 1
+
+
 def upsert_session_metadata(
     session_id: str,
     metadata: dict,
@@ -245,6 +276,8 @@ def main() -> None:
     container_client = _blob_client(conn_str, blob_container) if not args.dry_run else None
     table_client     = _table_client(conn_str, table_name)    if not args.dry_run else None
 
+    bcc_dir = data_dir / "bcc_states"
+
     # ── Upload loop ───────────────────────────────────────────────────────
     total_uploaded = 0
     for session_id in target_sessions:
@@ -256,9 +289,17 @@ def main() -> None:
         print(f"    shape=({meta['shape_rows']}×{meta['shape_cols']})  "
               f"steps={meta['total_steps']}  checkpoints={meta['n_checkpoints']}")
 
-        print("  Uploading blobs ...")
+        print("  Uploading session blobs ...")
         n = upload_session_blobs(
             session_id, session_dir, container_client,
+            dry_run=args.dry_run,
+            skip_existing=args.skip_existing,
+        )
+        total_uploaded += n
+
+        print("  Uploading BCC state ...")
+        n = upload_bcc_state_blob(
+            session_id, bcc_dir, container_client,
             dry_run=args.dry_run,
             skip_existing=args.skip_existing,
         )

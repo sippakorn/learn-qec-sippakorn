@@ -17,6 +17,7 @@ METADATA_LABELS = {
     "note":         "Note",
 }
 
+import networkx as nx
 import numpy as np
 import plotly.graph_objects as go
 from dash import (
@@ -320,6 +321,245 @@ def build_tanner_figure(step: int, session_id: str, height: int = 500) -> go.Fig
     return fig
 
 
+def load_bcc_state(session_id: str) -> np.ndarray | None:
+    path = _DATA_DIR / "bcc_states" / f"h_active_{session_id}.npz"
+    if not path.exists():
+        return None
+    return np.load(path)["H_active"]
+
+
+def _bcc_chain_layout(
+    H: np.ndarray,
+    gap: float = 1.5,
+    node_spacing: float = 1.0,
+) -> tuple:
+    """
+    Bipartite chain layout that follows the block-cut tree of the Tanner graph.
+
+    Returns:
+        var_pos  — {row_idx: x}  (y=1)
+        chk_pos  — {col_idx: x}  (y=0)
+        cut_vars — set of row indices that are articulation points
+        cut_chks — set of col indices that are articulation points
+        x_range  — [x_min, x_max]
+        fig_width — suggested pixel width
+    """
+    G = nx.Graph()
+    ri, ci = np.where(H != 0)
+    for r, c in zip(ri, ci):
+        G.add_edge(("v", int(r)), ("c", int(c)))
+
+    if G.number_of_nodes() == 0:
+        return {}, {}, set(), set(), [0.0, 1.0], 400
+
+    bccs = list(nx.biconnected_components(G))
+    cut_nodes_set = set(nx.articulation_points(G))
+    n_bcc = len(bccs)
+
+    node_to_bccs: dict = {}
+    for idx, bcc in enumerate(bccs):
+        for n in bcc:
+            node_to_bccs.setdefault(n, []).append(idx)
+
+    bcc_adj: dict = {i: [] for i in range(n_bcc)}
+    for node in cut_nodes_set:
+        bcc_idxs = node_to_bccs[node]
+        for a in range(len(bcc_idxs)):
+            for b in range(a + 1, len(bcc_idxs)):
+                bcc_adj[bcc_idxs[a]].append((bcc_idxs[b], node))
+                bcc_adj[bcc_idxs[b]].append((bcc_idxs[a], node))
+
+    visited: set = set()
+    order: list = []
+
+    def dfs(idx: int, entry_cut) -> None:
+        if idx in visited:
+            return
+        visited.add(idx)
+        order.append((idx, entry_cut))
+        for nbr_idx, shared_cut in bcc_adj[idx]:
+            if nbr_idx not in visited:
+                dfs(nbr_idx, shared_cut)
+
+    for start in range(n_bcc):
+        dfs(start, None)
+
+    pos: dict = {}
+    x_cursor = 0.0
+
+    for bcc_idx, entry_cut in order:
+        bcc_nodes = bccs[bcc_idx]
+        if entry_cut is not None:
+            if entry_cut not in pos:
+                y = 1.0 if entry_cut[0] == "v" else 0.0
+                pos[entry_cut] = (x_cursor, y)
+            x_cursor = pos[entry_cut][0] + gap
+
+        non_cut = [n for n in bcc_nodes if n not in cut_nodes_set]
+        var_nc = [n for n in non_cut if n[0] == "v"]
+        chk_nc = [n for n in non_cut if n[0] == "c"]
+
+        n_cols = max(len(var_nc), len(chk_nc), 1)
+        width = (n_cols - 1) * node_spacing
+        x_start, x_end = x_cursor, x_cursor + width
+
+        if var_nc:
+            for n, x in zip(var_nc, np.linspace(x_start, x_end, len(var_nc))):
+                pos[n] = (float(x), 1.0)
+        if chk_nc:
+            for n, x in zip(chk_nc, np.linspace(x_start, x_end, len(chk_nc))):
+                pos[n] = (float(x), 0.0)
+
+        x_cursor = x_end + gap
+        for n in bcc_nodes:
+            if n in cut_nodes_set and n not in pos:
+                y = 1.0 if n[0] == "v" else 0.0
+                pos[n] = (x_cursor, y)
+                x_cursor += gap
+
+    var_pos = {n[1]: pos[n][0] for n in pos if n[0] == "v"}
+    chk_pos = {n[1]: pos[n][0] for n in pos if n[0] == "c"}
+    cut_vars = {n[1] for n in cut_nodes_set if n[0] == "v"}
+    cut_chks = {n[1] for n in cut_nodes_set if n[0] == "c"}
+
+    all_x = [p[0] for p in pos.values()]
+    total_span = max(all_x) - min(all_x) if all_x else 1.0
+    fig_width = max(600, int(total_span * 20))
+    x_range = [min(all_x) - 1.0, max(all_x) + 1.0]
+
+    return var_pos, chk_pos, cut_vars, cut_chks, x_range, fig_width
+
+
+def _build_bcc_figure_from_H(H: np.ndarray, title: str, height: int) -> go.Figure:
+    """Core BCC Tanner graph figure builder — takes H directly."""
+    var_pos, chk_pos, cut_vars, cut_chks, x_range, fig_width = _bcc_chain_layout(H)
+    nRows, nCols = H.shape
+    row_deg = H.sum(axis=1)
+    col_deg = H.sum(axis=0)
+    ri, ci = np.where(H != 0)
+
+    fig = go.Figure()
+
+    edge_x: list = []
+    edge_y: list = []
+    for r, c in zip(ri, ci):
+        if r in var_pos and c in chk_pos:
+            edge_x += [var_pos[r], chk_pos[c], None]
+            edge_y += [1.0, 0.0, None]
+    if edge_x:
+        fig.add_trace(go.Scatter(
+            x=edge_x, y=edge_y, mode="lines",
+            line=dict(color="rgba(160,160,210,0.20)", width=0.8),
+            hoverinfo="skip", showlegend=False,
+        ))
+
+    # Variable nodes (rows)
+    normal_v = [i for i in range(nRows) if i in var_pos and i not in cut_vars]
+    cut_v    = [i for i in range(nRows) if i in var_pos and i in cut_vars]
+    if normal_v:
+        fig.add_trace(go.Scatter(
+            x=[var_pos[i] for i in normal_v], y=[1.0] * len(normal_v),
+            mode="markers",
+            marker=dict(size=[5 + int(row_deg[i]) for i in normal_v],
+                        color="#4c8bf5", line=dict(width=0.5, color="#2a5fc4")),
+            customdata=[[i, int(row_deg[i])] for i in normal_v],
+            hovertemplate="v%{customdata[0]}  deg %{customdata[1]}<extra></extra>",
+            name="variable",
+        ))
+    if cut_v:
+        fig.add_trace(go.Scatter(
+            x=[var_pos[i] for i in cut_v], y=[1.0] * len(cut_v),
+            mode="markers",
+            marker=dict(size=[9 + int(row_deg[i]) for i in cut_v],
+                        color="#f39c12", line=dict(width=1.5, color="#fff")),
+            customdata=[[i, int(row_deg[i])] for i in cut_v],
+            hovertemplate="v%{customdata[0]}  deg %{customdata[1]}  (cut)<extra></extra>",
+            name="variable (cut)",
+        ))
+
+    # Check nodes (cols)
+    normal_c = [j for j in range(nCols) if j in chk_pos and j not in cut_chks]
+    cut_c    = [j for j in range(nCols) if j in chk_pos and j in cut_chks]
+    if normal_c:
+        fig.add_trace(go.Scatter(
+            x=[chk_pos[j] for j in normal_c], y=[0.0] * len(normal_c),
+            mode="markers",
+            marker=dict(size=[5 + int(col_deg[j]) for j in normal_c],
+                        color="#e74c3c", symbol="square",
+                        line=dict(width=0.5, color="#c0392b")),
+            customdata=[[j, int(col_deg[j])] for j in normal_c],
+            hovertemplate="c%{customdata[0]}  deg %{customdata[1]}<extra></extra>",
+            name="check",
+        ))
+    if cut_c:
+        fig.add_trace(go.Scatter(
+            x=[chk_pos[j] for j in cut_c], y=[0.0] * len(cut_c),
+            mode="markers",
+            marker=dict(size=[9 + int(col_deg[j]) for j in cut_c],
+                        color="#f39c12", symbol="square",
+                        line=dict(width=1.5, color="#fff")),
+            customdata=[[j, int(col_deg[j])] for j in cut_c],
+            hovertemplate="c%{customdata[0]}  deg %{customdata[1]}  (cut)<extra></extra>",
+            name="check (cut)",
+        ))
+
+    fig.update_layout(
+        title=dict(text=title, x=0.5, font=dict(size=12, color="#ddd")),
+        annotations=[
+            dict(x=0.5, y=1.18, xref="paper", yref="paper",
+                 text="▲ Variable nodes (rows)", showarrow=False,
+                 font=dict(color="#4c8bf5", size=10), xanchor="center"),
+            dict(x=0.5, y=-0.13, xref="paper", yref="paper",
+                 text="▼ Check nodes (cols)", showarrow=False,
+                 font=dict(color="#e74c3c", size=10), xanchor="center"),
+        ],
+        margin=dict(l=20, r=20, t=60, b=40),
+        height=height, width=fig_width, autosize=False,
+        paper_bgcolor="#16213e", plot_bgcolor="#16213e",
+        font=dict(color="#ccc"), showlegend=True,
+        legend=dict(orientation="h", x=0.5, xanchor="center", y=1.14),
+        xaxis=dict(range=x_range, showticklabels=False,
+                   showgrid=False, zeroline=False),
+        yaxis=dict(range=[-0.3, 1.3], showticklabels=False,
+                   showgrid=False, zeroline=False),
+    )
+    return fig
+
+
+def build_bcc_figure(session_id: str, height: int = 280) -> go.Figure:
+    """Static BCC Tanner graph for the session — does not change with step."""
+    H = load_bcc_state(session_id)
+    if H is None:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No BCC state file found for this session.",
+            x=0.5, y=0.5, xref="paper", yref="paper",
+            showarrow=False, font=dict(color="#666", size=12),
+        )
+        fig.update_layout(
+            height=height, margin=dict(l=20, r=20, t=40, b=20),
+            paper_bgcolor="#16213e", plot_bgcolor="#16213e",
+        )
+        return fig
+    nRows, nCols = H.shape
+    n_cuts = len(set(nx.articulation_points(
+        nx.Graph([(("v", r), ("c", c)) for r, c in zip(*np.where(H != 0))])
+    )))
+    title = f"BCC Tanner Graph  ·  {nRows} var  {nCols} chk  ·  {n_cuts} cut node(s)"
+    return _build_bcc_figure_from_H(H, title, height)
+
+
+def build_bcc_step_figure(step: int, session_id: str, height: int = 380) -> go.Figure:
+    """BCC Tanner graph for the current replay step — updates on every step."""
+    rep = get_replayer(session_id)
+    H = rep.get_step(step).toarray()[:, :-1]   # strip augmented syndrome column
+    nRows, nCols = H.shape
+    n_edges = int((H != 0).sum())
+    title = (f"BCC Tanner Graph — Step {step} / {rep.total_steps()}"
+             f"  ·  {nRows} var  {nCols} chk  ·  {n_edges} edges")
+    return _build_bcc_figure_from_H(H, title, height)
+
+
 def build_event_info(step: int, session_id: str) -> list:
     rep = get_replayer(session_id)
     ev = rep.event_at(step)
@@ -389,6 +629,12 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
            "background": "#1e2d50", "color": "#ddd",
            "border": "1px solid #334", "borderRadius": "4px"}
 
+    _BTN_TOGGLE_GRAPH  = {**BTN, "marginLeft": "20px",
+                          "background": "#1e3a3a", "borderColor": "#2ecc71", "color": "#2ecc71"}
+    _BTN_TOGGLE_MATRIX = {**BTN, "marginLeft": "20px",
+                          "background": "#3a1e3a", "borderColor": "#9b59b6", "color": "#9b59b6"}
+    _BTN_TOGGLE_HIDDEN = {**BTN, "marginLeft": "20px", "display": "none"}
+
     # ── layout ───────────────────────────────────────────────────────────
     app.layout = html.Div(
         style={"background": BG_PAGE, "minHeight": "100vh",
@@ -419,7 +665,7 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                         id="preview-mode-dropdown",
                         options=[{"label": "Single", "value": "Single"},
                                  {"label": "Dual",   "value": "Dual"}],
-                        value="Single",
+                        value="Dual",
                         clearable=False,
                         style={"width": "100px", "color": "#111"},
                     ),
@@ -491,19 +737,28 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
                 html.Button("⏭", id="goto-end-btn", n_clicks=0,
                             style={**BTN, "marginLeft": "6px"}, title="Go to end"),
                 html.Button("Graph", id="graph-toggle-btn", n_clicks=0,
-                            style={**BTN, "marginLeft": "20px",
-                                   "background": "#1e3a3a", "borderColor": "#2ecc71",
-                                   "color": "#2ecc71"},
+                            style=_BTN_TOGGLE_HIDDEN,
                             title="Toggle Tanner graph view"),
             ]),
 
-            # ── Tanner graph panel — Dual mode only (hidden by default) ──
+            # ── Tanner graph panel — Dual mode only ───────────────────
             html.Div(id="tanner-dual-container",
-                     style={"display": "none"},
                      children=[
                 html.Div(style={**CARD, "overflowX": "auto", "textAlign": "center"}, children=[
                     html.Div(style={"display": "inline-block"}, children=[
                         dcc.Graph(id="tanner-graph-dual",
+                                  config={"displayModeBar": False},
+                                  style={}),
+                    ]),
+                ]),
+            ]),
+
+            # ── BCC Tanner graph panel — Dual mode only ───────────────
+            html.Div(id="bcc-dual-container",
+                     children=[
+                html.Div(style={**CARD, "overflowX": "auto", "textAlign": "center"}, children=[
+                    html.Div(style={"display": "inline-block"}, children=[
+                        dcc.Graph(id="bcc-tanner-graph",
                                   config={"displayModeBar": False},
                                   style={}),
                     ]),
@@ -626,12 +881,6 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
             return maximum
         return no_update
 
-    _BTN_TOGGLE_GRAPH  = {**BTN, "marginLeft": "20px",
-                          "background": "#1e3a3a", "borderColor": "#2ecc71", "color": "#2ecc71"}
-    _BTN_TOGGLE_MATRIX = {**BTN, "marginLeft": "20px",
-                          "background": "#3a1e3a", "borderColor": "#9b59b6", "color": "#9b59b6"}
-    _BTN_TOGGLE_HIDDEN = {**BTN, "marginLeft": "20px", "display": "none"}
-
     @app.callback(
         Output("view-mode-store", "data"),
         Output("graph-toggle-btn", "children"),
@@ -651,6 +900,7 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
 
     @app.callback(
         Output("tanner-dual-container", "style"),
+        Output("bcc-dual-container", "style"),
         Output("graph-toggle-btn", "style", allow_duplicate=True),
         Output("view-mode-store", "data", allow_duplicate=True),
         Input("preview-mode-dropdown", "value"),
@@ -658,12 +908,12 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
     )
     def update_preview_mode(preview_mode: str):
         if preview_mode == "Dual":
-            dual_style   = {}                # visible
+            panel_style  = {}
             toggle_style = _BTN_TOGGLE_HIDDEN
         else:
-            dual_style   = {"display": "none"}
+            panel_style  = {"display": "none"}
             toggle_style = _BTN_TOGGLE_GRAPH
-        return dual_style, toggle_style, "matrix"
+        return panel_style, panel_style, toggle_style, "matrix"
 
     @app.callback(
         Output("tanner-graph-dual", "figure"),
@@ -674,6 +924,16 @@ def build_app(data_dir: Path, initial_session: Optional[str] = None) -> Dash:
     def update_tanner_dual(step, session_id: str, preview_mode: str):
         if preview_mode != "Dual" or not session_id:
             return no_update
-        return build_tanner_figure(int(step or 0), session_id, height=380)
+        return build_bcc_step_figure(int(step or 0), session_id, height=380)
+
+    @app.callback(
+        Output("bcc-tanner-graph", "figure"),
+        Input("session-dropdown", "value"),
+        Input("preview-mode-dropdown", "value"),
+    )
+    def update_bcc_panel(session_id: str, preview_mode: str):
+        if preview_mode != "Dual" or not session_id:
+            return no_update
+        return build_bcc_figure(session_id, height=280)
 
     return app
