@@ -10,9 +10,12 @@ interface Props {
   changedCells: [number, number][];
   step: number;
   totalSteps: number;
+  rowPerm?: number[];   // rowPerm[matrix_row] = original_node_index
 }
 
-export default function MatrixHeatmap({ matrix, changedCells, step, totalSteps }: Props) {
+const LABEL_MARGIN = 52;  // px reserved for y-axis tick labels
+
+export default function MatrixHeatmap({ matrix, changedCells, step, totalSteps, rowPerm }: Props) {
   const { shape, row, col, data } = matrix;
   const [nRows, nCols] = shape;
 
@@ -21,8 +24,16 @@ export default function MatrixHeatmap({ matrix, changedCells, step, totalSteps }
   const cellPx   = MAX_SIDE / Math.max(nRows, nCols);
   const plotW    = Math.max(40, Math.round(nCols * cellPx * 1.5));  // 1.5× wider
   const plotH    = Math.max(40, Math.round(nRows * cellPx));
-  const figWidth  = plotW + 20;   // margin l=10, r=10
-  const figHeight = plotH + 50;   // margin t=40, b=10
+  const lMargin  = rowPerm ? LABEL_MARGIN : 10;
+  const figWidth  = plotW + lMargin + 10;  // l + r margins
+  const figHeight = plotH + 50;            // margin t=40, b=10
+
+  // Y-axis tick labels: "v{j}" for identity rows, "v{j} ←" for swapped rows.
+  const tickText = rowPerm
+    ? Array.from({ length: nRows }, (_, i) =>
+        rowPerm[i] === i ? `v${i}` : `v${rowPerm[i]} ←`
+      )
+    : null;
 
   // Build dense grid for Plotly (null = zero)
   const z: (number | null)[][] = Array.from({ length: nRows }, () =>
@@ -72,7 +83,7 @@ export default function MatrixHeatmap({ matrix, changedCells, step, totalSteps }
             x: 0.5,
             font: { size: 14, color: "#ddd" },
           },
-          margin: { l: 10, r: 10, t: 40, b: 10 },
+          margin: { l: lMargin, r: 10, t: 40, b: 10 },
           height: figHeight,
           width: figWidth,
           autosize: false,
@@ -80,7 +91,18 @@ export default function MatrixHeatmap({ matrix, changedCells, step, totalSteps }
           plot_bgcolor: "#16213e",
           font: { color: "#ccc" },
           xaxis: { showticklabels: false, showgrid: false, zeroline: false },
-          yaxis: { showticklabels: false, showgrid: false, zeroline: false, autorange: "reversed" },
+          yaxis: tickText
+            ? {
+                tickmode: "array",
+                tickvals: Array.from({ length: nRows }, (_, i) => i),
+                ticktext: tickText,
+                tickfont: { size: 9, color: "#aaa" },
+                showticklabels: true,
+                showgrid: false,
+                zeroline: false,
+                autorange: "reversed",
+              }
+            : { showticklabels: false, showgrid: false, zeroline: false, autorange: "reversed" },
         }}
         config={{ displayModeBar: false }}
         style={{ width: figWidth, height: figHeight + 10 }}

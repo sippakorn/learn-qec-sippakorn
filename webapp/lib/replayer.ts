@@ -216,6 +216,21 @@ export interface StepResult {
   matrix:       CooMatrix;
   changedCells: [number, number][];
   event:        EventRecord | null;
+  rowPerm:      number[];   // rowPerm[matrix_row] = original_node_index
+}
+
+// Replay only swap events up to step n to produce the row permutation array.
+// Add future row-exchange event types here alongside swap_rows.
+function computeRowPerm(events: EventRecord[], n: number, nRows: number): number[] {
+  const perm = Array.from({ length: nRows }, (_, i) => i);
+  for (let i = 0; i < n; i++) {
+    const ev = events[i];
+    if (ev.event_type === "swap_rows") {
+      const r1 = ev.params.row_i, r2 = ev.params.row_j;
+      [perm[r1], perm[r2]] = [perm[r2], perm[r1]];
+    }
+  }
+  return perm;
 }
 
 export async function getStep(sessionId: string, n: number): Promise<StepResult> {
@@ -254,6 +269,7 @@ export async function getStep(sessionId: string, n: number): Promise<StepResult>
     matrix:       csrToCoo(curr),
     changedCells: n === 0 ? [] : diffCells(prev, curr),
     event:        n > 0 ? state.events[n - 1] : null,
+    rowPerm:      computeRowPerm(state.events, n, state.shape[0]),
   };
 }
 

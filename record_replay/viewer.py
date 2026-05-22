@@ -33,6 +33,8 @@ from replayer import Replayer
 
 _DATA_DIR: Path = Path(__file__).parent / "data"
 _REPLAYERS: dict[str, Replayer] = {}
+_LAYOUTS: dict[str, tuple] = {}          # session_id -> layout tuple from step 0
+_PERMS:   dict[str, list]  = {}          # session_id -> list[ndarray], one per step
 
 SPEED_OPTIONS = [
     {"label": "0.5×", "value": 2000},
@@ -94,6 +96,7 @@ def _slider_marks(total: int) -> dict:
 
 def build_figure(step: int, session_id: str) -> go.Figure:
     rep = get_replayer(session_id)
+    _ensure_session_cache(session_id, rep)
 
     # Fetch prev first: cache at (step-1) lets get_step(step) cost 1 event
     prev_step = max(0, step - 1)
@@ -104,6 +107,15 @@ def build_figure(step: int, session_id: str) -> go.Figure:
     dense = mat_curr.toarray()
     dense_prev = mat_prev.toarray()
     diff_mask = (dense != dense_prev).astype(np.float32)
+
+    # Build y-axis labels from the current row permutation.
+    # row_perm[matrix_row] = original node index.
+    row_perm = _PERMS[session_id][step]
+    nRows = dense.shape[0]
+    tick_text = [
+        f"v{row_perm[i]}" if row_perm[i] == i else f"v{row_perm[i]} ←"
+        for i in range(nRows)
+    ]
 
     fig = go.Figure()
 
@@ -135,15 +147,16 @@ def build_figure(step: int, session_id: str) -> go.Figure:
     cell_px = MAX_SIDE / max(nRows, nCols)
     plot_w  = max(40, round(nCols * cell_px * 1.5))  # 1.5× wider
     plot_h  = max(40, round(nRows * cell_px))
-    fig_w   = plot_w + 20   # margin l=10, r=10
-    fig_h   = plot_h + 50   # margin t=40, b=10
+    LABEL_MARGIN = 52                    # px reserved for y-axis tick labels
+    fig_w   = plot_w + LABEL_MARGIN + 10  # l=LABEL_MARGIN, r=10
+    fig_h   = plot_h + 50                 # margin t=40, b=10
 
     fig.update_layout(
         title=dict(
             text=f"Step {step} / {rep.total_steps()}",
             x=0.5, font=dict(size=14, color="#ddd"),
         ),
-        margin=dict(l=10, r=10, t=40, b=10),
+        margin=dict(l=LABEL_MARGIN, r=10, t=40, b=10),
         height=fig_h,
         width=fig_w,
         autosize=False,
@@ -152,8 +165,16 @@ def build_figure(step: int, session_id: str) -> go.Figure:
         font=dict(color="#ccc"),
     )
     fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
-    fig.update_yaxes(showticklabels=False, showgrid=False,
-                     zeroline=False, autorange="reversed")
+    fig.update_yaxes(
+        tickmode="array",
+        tickvals=list(range(nRows)),
+        ticktext=tick_text,
+        tickfont=dict(size=9, color="#aaa"),
+        showticklabels=True,
+        showgrid=False,
+        zeroline=False,
+        autorange="reversed",
+    )
 
     return fig
 
@@ -430,21 +451,43 @@ def _bcc_chain_layout(
     return var_pos, chk_pos, cut_vars, cut_chks, x_range, fig_width
 
 
-def _build_bcc_figure_from_H(H: np.ndarray, title: str, height: int) -> go.Figure:
-    """Core BCC Tanner graph figure builder — takes H directly."""
-    var_pos, chk_pos, cut_vars, cut_chks, x_range, fig_width = _bcc_chain_layout(H)
+def _build_bcc_figure_from_H(
+    H: np.ndarray,
+    title: str,
+    height: int,
+    layout: tuple | None = None,
+    row_perm: np.ndarray | None = None,
+) -> go.Figure:
+    """Core BCC Tanner graph figure builder — takes H directly.
+
+    layout:   pre-computed tuple from _bcc_chain_layout (fixed positions).
+    row_perm: row_perm[matrix_row] = original_row — maps the current matrix row
+              index back to the original node identity used as the layout key.
+              When None, identity mapping is assumed.
+    """
+    if layout is not None:
+        var_pos, chk_pos, cut_vars, cut_chks, x_range, fig_width = layout
+    else:
+        var_pos, chk_pos, cut_vars, cut_chks, x_range, fig_width = _bcc_chain_layout(H)
     nRows, nCols = H.shape
     row_deg = H.sum(axis=1)
     col_deg = H.sum(axis=0)
     ri, ci = np.where(H != 0)
+
+    # orig_to_curr[original_row] = current_matrix_row for degree lookups.
+    if row_perm is not None:
+        orig_to_curr: dict[int, int] = {int(row_perm[i]): i for i in range(nRows)}
+    else:
+        orig_to_curr = {i: i for i in range(nRows)}
 
     fig = go.Figure()
 
     edge_x: list = []
     edge_y: list = []
     for r, c in zip(ri, ci):
-        if r in var_pos and c in chk_pos:
-            edge_x += [var_pos[r], chk_pos[c], None]
+        orig_r = int(row_perm[r]) if row_perm is not None else r
+        if orig_r in var_pos and c in chk_pos:
+            edge_x += [var_pos[orig_r], chk_pos[c], None]
             edge_y += [1.0, 0.0, None]
     if edge_x:
         fig.add_trace(go.Scatter(
@@ -453,26 +496,26 @@ def _build_bcc_figure_from_H(H: np.ndarray, title: str, height: int) -> go.Figur
             hoverinfo="skip", showlegend=False,
         ))
 
-    # Variable nodes (rows)
-    normal_v = [i for i in range(nRows) if i in var_pos and i not in cut_vars]
-    cut_v    = [i for i in range(nRows) if i in var_pos and i in cut_vars]
+    # Variable nodes — iterate over original row indices (var_pos keys).
+    normal_v = [j for j in sorted(var_pos) if j not in cut_vars]
+    cut_v    = [j for j in sorted(var_pos) if j in cut_vars]
     if normal_v:
         fig.add_trace(go.Scatter(
-            x=[var_pos[i] for i in normal_v], y=[1.0] * len(normal_v),
+            x=[var_pos[j] for j in normal_v], y=[1.0] * len(normal_v),
             mode="markers",
-            marker=dict(size=[5 + int(row_deg[i]) for i in normal_v],
+            marker=dict(size=[5 + int(row_deg[orig_to_curr[j]]) for j in normal_v],
                         color="#4c8bf5", line=dict(width=0.5, color="#2a5fc4")),
-            customdata=[[i, int(row_deg[i])] for i in normal_v],
+            customdata=[[j, int(row_deg[orig_to_curr[j]])] for j in normal_v],
             hovertemplate="v%{customdata[0]}  deg %{customdata[1]}<extra></extra>",
             name="variable",
         ))
     if cut_v:
         fig.add_trace(go.Scatter(
-            x=[var_pos[i] for i in cut_v], y=[1.0] * len(cut_v),
+            x=[var_pos[j] for j in cut_v], y=[1.0] * len(cut_v),
             mode="markers",
-            marker=dict(size=[9 + int(row_deg[i]) for i in cut_v],
+            marker=dict(size=[9 + int(row_deg[orig_to_curr[j]]) for j in cut_v],
                         color="#f39c12", line=dict(width=1.5, color="#fff")),
-            customdata=[[i, int(row_deg[i])] for i in cut_v],
+            customdata=[[j, int(row_deg[orig_to_curr[j]])] for j in cut_v],
             hovertemplate="v%{customdata[0]}  deg %{customdata[1]}  (cut)<extra></extra>",
             name="variable (cut)",
         ))
@@ -549,15 +592,50 @@ def build_bcc_figure(session_id: str, height: int = 280) -> go.Figure:
     return _build_bcc_figure_from_H(H, title, height)
 
 
+def _ensure_session_cache(session_id: str, rep) -> None:
+    """Compute and cache the step-0 layout and all row permutations for a session.
+
+    Called lazily on the first render for a given session.
+    """
+    if session_id in _LAYOUTS:
+        return
+
+    H0 = rep.get_step(0).toarray()[:, :-1]
+    _LAYOUTS[session_id] = _bcc_chain_layout(H0)
+
+    nRows = H0.shape[0]
+    perm = np.arange(nRows)
+    perms: list[np.ndarray] = [perm.copy()]   # step 0 = identity
+
+    for s in range(1, rep.total_steps() + 1):
+        ev = rep.event_at(s)
+        # Add future row-exchange event types here alongside swap_rows.
+        if ev and ev["event_type"] == "swap_rows":
+            r1, r2 = ev["params"]["row_i"], ev["params"]["row_j"]
+            perm[r1], perm[r2] = perm[r2], perm[r1]
+        perms.append(perm.copy())
+
+    _PERMS[session_id] = perms
+
+
 def build_bcc_step_figure(step: int, session_id: str, height: int = 380) -> go.Figure:
-    """BCC Tanner graph for the current replay step — updates on every step."""
+    """BCC Tanner graph for the current replay step — updates on every step.
+
+    Node positions are fixed to the step-0 layout.  Row permutations caused by
+    swap_rows events are tracked so edges stay anchored to their original node.
+    """
     rep = get_replayer(session_id)
+    _ensure_session_cache(session_id, rep)
+
     H = rep.get_step(step).toarray()[:, :-1]   # strip augmented syndrome column
+    row_perm = _PERMS[session_id][step]
     nRows, nCols = H.shape
     n_edges = int((H != 0).sum())
     title = (f"BCC Tanner Graph — Step {step} / {rep.total_steps()}"
              f"  ·  {nRows} var  {nCols} chk  ·  {n_edges} edges")
-    return _build_bcc_figure_from_H(H, title, height)
+    return _build_bcc_figure_from_H(H, title, height,
+                                    layout=_LAYOUTS[session_id],
+                                    row_perm=row_perm)
 
 
 def build_event_info(step: int, session_id: str) -> list:

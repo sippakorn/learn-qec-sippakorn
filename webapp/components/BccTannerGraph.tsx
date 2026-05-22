@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import dynamic from "next/dynamic";
 import type { CooMatrix } from "@/lib/replayer";
 
@@ -11,7 +12,9 @@ interface Props {
   step: number;
   totalSteps: number;
   height?: number;
-  staticLabel?: string; // if set, replaces step info in the title
+  staticLabel?: string;    // if set, replaces step info in the title
+  initMatrix?: CooMatrix;  // step-0 matrix for fixed layout; falls back to matrix
+  rowPerm?: number[];      // rowPerm[matrix_row] = original_node_index
 }
 
 // ---------------------------------------------------------------------------
@@ -249,13 +252,14 @@ function computeBccLayout(
 // ---------------------------------------------------------------------------
 
 export default function BccTannerGraph({
-  matrix, step, totalSteps, height = 380, staticLabel,
+  matrix, step, totalSteps, height = 380, staticLabel, initMatrix, rowPerm,
 }: Props) {
   const { shape, row, col, data } = matrix;
   const [nRows, nCols] = shape;
   const nVars = nRows;
   const nChks = nCols - 1; // strip augmented syndrome column
 
+  // ── Degrees and edges from the current matrix ───────────────────────────
   const rowDeg = new Array<number>(nVars).fill(0);
   const colDeg = new Array<number>(nChks).fill(0);
   const edgeRows: number[] = [];
@@ -270,19 +274,52 @@ export default function BccTannerGraph({
     edgeCols.push(c);
   }
 
-  const { varX, chkX, cutVars, cutChks, xMin, xMax, figWidth } =
-    computeBccLayout(nVars, nChks, edgeRows, edgeCols);
+  // ── Fixed layout from initMatrix (or current matrix as fallback) ────────
+  // layoutSrc is stable between steps when initMatrix is provided (SWR caches
+  // the step-0 response and returns the same object reference each render).
+  const layoutSrc = initMatrix ?? matrix;
+  const { varX, chkX, cutVars, cutChks, xMin, xMax, figWidth } = useMemo(() => {
+    const sNVars = layoutSrc.shape[0];
+    const sNChks = layoutSrc.shape[1] - 1;
+    const sEdgeRows: number[] = [];
+    const sEdgeCols: number[] = [];
+    for (let i = 0; i < layoutSrc.row.length; i++) {
+      const r = layoutSrc.row[i], c = layoutSrc.col[i];
+      if (c < sNChks && layoutSrc.data[i] !== 0) {
+        sEdgeRows.push(r);
+        sEdgeCols.push(c);
+      }
+    }
+    return computeBccLayout(sNVars, sNChks, sEdgeRows, sEdgeCols);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutSrc]);
 
-  // Edge trace
+  // ── origToCurr[original_node_j] = current_matrix_row ────────────────────
+  // Needed to look up live degree for a node identified by original index j.
+  const origToCurr = useMemo(() => {
+    if (!rowPerm) return null;
+    const arr = new Int32Array(nVars);
+    for (let r = 0; r < nVars; r++) arr[rowPerm[r]] = r;
+    return arr;
+  }, [rowPerm, nVars]);
+
+  // Helper: degree of original node j in the current matrix.
+  const varDeg = (j: number) => origToCurr ? rowDeg[origToCurr[j]] : rowDeg[j];
+
+  // ── Edge trace ───────────────────────────────────────────────────────────
+  // For each edge (current matrix row r, col c), the original node is
+  // rowPerm[r].  Its x position in the fixed layout is varX[rowPerm[r]].
   const edgeX: (number | null)[] = [];
   const edgeY: (number | null)[] = [];
   for (let i = 0; i < edgeRows.length; i++) {
-    edgeX.push(varX[edgeRows[i]], chkX[edgeCols[i]], null);
+    const r = edgeRows[i];
+    const origR = rowPerm ? rowPerm[r] : r;
+    edgeX.push(varX[origR], chkX[edgeCols[i]], null);
     edgeY.push(1, 0, null);
   }
 
-  // Partition nodes into normal / cut
-  const normalVarIdx = Array.from({ length: nVars }, (_, i) => i).filter(i => !cutVars.has(i));
+  // ── Node partitions — iterate over original node indices (layout keys) ──
+  const normalVarIdx = Array.from({ length: nVars }, (_, j) => j).filter(j => !cutVars.has(j));
   const cutVarIdx    = [...cutVars];
   const normalChkIdx = Array.from({ length: nChks }, (_, j) => j).filter(j => !cutChks.has(j));
   const cutChkIdx    = [...cutChks];
@@ -302,11 +339,11 @@ export default function BccTannerGraph({
   if (normalVarIdx.length > 0) {
     traces.push({
       type: "scatter",
-      x: normalVarIdx.map(i => varX[i]),
+      x: normalVarIdx.map(j => varX[j]),
       y: normalVarIdx.map(() => 1),
       mode: "markers",
-      marker: { size: normalVarIdx.map(i => 5 + rowDeg[i]), color: "#4c8bf5", line: { width: 0.5, color: "#2a5fc4" } },
-      customdata: normalVarIdx.map(i => [i, rowDeg[i]]),
+      marker: { size: normalVarIdx.map(j => 5 + varDeg(j)), color: "#4c8bf5", line: { width: 0.5, color: "#2a5fc4" } },
+      customdata: normalVarIdx.map(j => [j, varDeg(j)]),
       hovertemplate: "v%{customdata[0]}  deg %{customdata[1]}<extra></extra>",
       name: "variable",
     });
@@ -316,17 +353,17 @@ export default function BccTannerGraph({
   if (cutVarIdx.length > 0) {
     traces.push({
       type: "scatter",
-      x: cutVarIdx.map(i => varX[i]),
+      x: cutVarIdx.map(j => varX[j]),
       y: cutVarIdx.map(() => 1),
       mode: "markers",
-      marker: { size: cutVarIdx.map(i => 9 + rowDeg[i]), color: "#f39c12", line: { width: 1.5, color: "#fff" } },
-      customdata: cutVarIdx.map(i => [i, rowDeg[i]]),
+      marker: { size: cutVarIdx.map(j => 9 + varDeg(j)), color: "#f39c12", line: { width: 1.5, color: "#fff" } },
+      customdata: cutVarIdx.map(j => [j, varDeg(j)]),
       hovertemplate: "v%{customdata[0]}  deg %{customdata[1]}  (cut)<extra></extra>",
       name: "variable (cut)",
     });
   }
 
-  // Normal check nodes (red squares, y=0)
+  // Normal check nodes (red squares, y=0) — no column permutation
   if (normalChkIdx.length > 0) {
     traces.push({
       type: "scatter",

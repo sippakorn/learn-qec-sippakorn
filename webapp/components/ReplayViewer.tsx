@@ -129,6 +129,7 @@ export default function ReplayViewer({ sessions }: Props) {
                 changedCells={stepData.changedCells}
                 step={stepData.step}
                 totalSteps={stepData.totalSteps}
+                rowPerm={stepData.rowPerm}
               />
             ) : (
               <TannerGraph
@@ -184,6 +185,8 @@ export default function ReplayViewer({ sessions }: Props) {
               step={stepData.step}
               totalSteps={stepData.totalSteps}
               height={380}
+              initMatrix={bccInitData?.matrix}
+              rowPerm={stepData.rowPerm}
             />
           ) : (
             <div className="h-40 flex items-center justify-center text-gray-600">Loading…</div>
