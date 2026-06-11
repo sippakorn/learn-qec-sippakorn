@@ -48,9 +48,9 @@ function computeLayout(nVars: number, nChks: number, edgeRows: number[], edgeCol
 
   const allRoots = new Set([...compVars.keys(), ...compChks.keys()]);
   const components = [...allRoots].sort((a, b) => {
-    const sa = (compVars.get(a)?.length ?? 0) + (compChks.get(a)?.length ?? 0);
-    const sb = (compVars.get(b)?.length ?? 0) + (compChks.get(b)?.length ?? 0);
-    return sb - sa;
+    const minA = Math.min(...(compVars.get(a) ?? [Infinity]));
+    const minB = Math.min(...(compVars.get(b) ?? [Infinity]));
+    return minA - minB;
   });
 
   const GAP = 3;

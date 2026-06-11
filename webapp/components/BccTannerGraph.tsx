@@ -183,6 +183,13 @@ function computeBccLayout(
   }
 
   // ── DFS on BCC adjacency to get left-to-right order ──────────────────
+  // Pre-compute min variable index per BCC to drive ordering.
+  const bccMinVar = bccs.map(bcc => {
+    let min = Infinity;
+    for (const nd of bcc) if (nd < nVars && nd < min) min = nd;
+    return min;
+  });
+
   const visitedBcc = new Set<number>();
   const order: Array<{ bccIdx: number; entryCut: number | null }> = [];
 
@@ -190,10 +197,12 @@ function computeBccLayout(
     if (visitedBcc.has(idx)) return;
     visitedBcc.add(idx);
     order.push({ bccIdx: idx, entryCut });
-    for (const { nbr, cutNode } of bccAdj[idx])
+    const sorted = bccAdj[idx].slice().sort((a, b) => bccMinVar[a.nbr] - bccMinVar[b.nbr]);
+    for (const { nbr, cutNode } of sorted)
       if (!visitedBcc.has(nbr)) dfsBcc(nbr, cutNode);
   }
-  for (let i = 0; i < nBcc; i++) dfsBcc(i, null);
+  const bccStart = Array.from({ length: nBcc }, (_, i) => i).sort((a, b) => bccMinVar[a] - bccMinVar[b]);
+  for (const i of bccStart) dfsBcc(i, null);
 
   // ── Assign x positions ────────────────────────────────────────────────
   const placed = new Map<number, number>(); // nodeId → x
@@ -219,6 +228,8 @@ function computeBccLayout(
       if (nd < nVars) varNc.push(nd);
       else chkNc.push(nd - nVars);
     }
+    varNc.sort((a, b) => a - b);
+    chkNc.sort((a, b) => a - b);
 
     const nCols = Math.max(varNc.length, chkNc.length, 1);
     const width = (nCols - 1) * nodeSpacing;
@@ -230,7 +241,7 @@ function computeBccLayout(
     xCursor = xEnd + gap;
 
     // Exit cut nodes not yet placed
-    for (const nd of bcc)
+    for (const nd of [...bcc].sort((a, b) => a - b))
       if (cutNodeSet.has(nd) && !placed.has(nd)) {
         placed.set(nd, xCursor);
         xCursor += gap;

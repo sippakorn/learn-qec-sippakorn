@@ -224,8 +224,7 @@ def _layout_tanner(H: np.ndarray):
     all_roots = set(comp_vars) | set(comp_chks)
     components = sorted(
         all_roots,
-        key=lambda r: len(comp_vars.get(r, [])) + len(comp_chks.get(r, [])),
-        reverse=True,
+        key=lambda r: min(comp_vars.get(r, [float('inf')])),
     )
 
     GAP = 3
@@ -390,6 +389,12 @@ def _bcc_chain_layout(
                 bcc_adj[bcc_idxs[a]].append((bcc_idxs[b], node))
                 bcc_adj[bcc_idxs[b]].append((bcc_idxs[a], node))
 
+    # Pre-compute minimum variable index per BCC to drive left-to-right ordering.
+    bcc_min_var: dict[int, float] = {}
+    for idx, bcc in enumerate(bccs):
+        vars_in_bcc = [n[1] for n in bcc if n[0] == "v"]
+        bcc_min_var[idx] = min(vars_in_bcc) if vars_in_bcc else float('inf')
+
     visited: set = set()
     order: list = []
 
@@ -398,11 +403,11 @@ def _bcc_chain_layout(
             return
         visited.add(idx)
         order.append((idx, entry_cut))
-        for nbr_idx, shared_cut in bcc_adj[idx]:
+        for nbr_idx, shared_cut in sorted(bcc_adj[idx], key=lambda x: bcc_min_var[x[0]]):
             if nbr_idx not in visited:
                 dfs(nbr_idx, shared_cut)
 
-    for start in range(n_bcc):
+    for start in sorted(range(n_bcc), key=lambda i: bcc_min_var[i]):
         dfs(start, None)
 
     pos: dict = {}
@@ -417,8 +422,8 @@ def _bcc_chain_layout(
             x_cursor = pos[entry_cut][0] + gap
 
         non_cut = [n for n in bcc_nodes if n not in cut_nodes_set]
-        var_nc = [n for n in non_cut if n[0] == "v"]
-        chk_nc = [n for n in non_cut if n[0] == "c"]
+        var_nc = sorted([n for n in non_cut if n[0] == "v"], key=lambda n: n[1])
+        chk_nc = sorted([n for n in non_cut if n[0] == "c"], key=lambda n: n[1])
 
         n_cols = max(len(var_nc), len(chk_nc), 1)
         width = (n_cols - 1) * node_spacing
@@ -432,7 +437,7 @@ def _bcc_chain_layout(
                 pos[n] = (float(x), 0.0)
 
         x_cursor = x_end + gap
-        for n in bcc_nodes:
+        for n in sorted(bcc_nodes, key=lambda n: n[1]):
             if n in cut_nodes_set and n not in pos:
                 y = 1.0 if n[0] == "v" else 0.0
                 pos[n] = (x_cursor, y)
